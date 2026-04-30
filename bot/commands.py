@@ -1,11 +1,10 @@
 """
 bot/commands.py
-Pure command handler coroutines for all Telegram bot commands.
-Uses plain text (no parse_mode) to avoid Markdown escaping issues.
+All /command handlers. Uses nav.py for state, formatter.py for messages,
+and ui.py for keyboards. No circular imports.
 """
 
 import io
-
 import logging
 
 from telegram import Update
@@ -13,64 +12,93 @@ from telegram.ext import ContextTypes
 
 from drive import auth as drive_auth
 from drive import drive_service as ds
+from bot import formatter, ui
+from bot import nav
 from services import parser as p
 from services.zip_service import create_zip
+from db import models
 
 logger = logging.getLogger(__name__)
-
-# Per-user breadcrumb stack: list of (folder_id, folder_name)
-# Root is represented as ("root", "🏠 Home")
-_folder_stack: dict[int, list[tuple[str, str]]] = {}
 
 
 def _uid(update: Update) -> int:
     return update.effective_user.id
 
 
-def _stack(uid: int) -> list[tuple[str, str]]:
-    if uid not in _folder_stack:
-        _folder_stack[uid] = [("root", "🏠 Home")]
-    return _folder_stack[uid]
+# ─────────────────────────────────────────────────────────────────────────────
+# Shared browse renderer (safe for both message and callback contexts)
+# ─────────────────────────────────────────────────────────────────────────────
 
+async def _send_browse(uid: int, send_fn) -> None:
+    """
+    Fetch current folder contents and send/edit via send_fn(text, reply_markup).
+    send_fn is either update.message.reply_text or query.edit_message_text.
+    """
+    try:
+        fid  = nav.current_folder_id(uid)
+        name = nav.current_folder_name(uid)
+        path = nav.breadcrumb(uid)
 
-def _folder(uid: int) -> str:
-    return _stack(uid)[-1][0]
+        folders = ds.list_folders(uid, parent_id=fid)
+        files   = ds.list_files(uid, parent_id=fid)
 
+        text   = formatter.file_listing(name, path, files, folders)
+        markup = ui.browse_keyboard(folders + files, is_root=(fid == "root"))
 
-def _folder_name(uid: int) -> str:
-    return _stack(uid)[-1][1]
-
-
-def _breadcrumb(uid: int) -> str:
-    return " > ".join(name for _, name in _stack(uid))
+        await send_fn(text, markup)
+    except PermissionError:
+        await send_fn(formatter.login_required(), None)
+    except Exception as e:
+        logger.exception("browse error")
+        await send_fn(formatter.error(str(e)), None)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# /start
+# /start  /menu
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    msg = (
-        "👋 Welcome to Google Drive Bot!\n\n"
-        "Use /login to connect your Google account.\n\n"
-        "Available commands:\n"
-        "/folders — list folders in current location\n"
-        "/open <folder> — enter a folder\n"
-        "/cd — go back to previous folder\n"
-        "/pwd — show current folder path\n"
-        "/list — list files in current folder\n"
-        "/get <filename> — download a file\n"
-        "/search <keyword> — search files\n"
-        "/rename <old> <new> — rename a file\n"
-        "/delete <filename> — delete a file\n"
-        "/zip <keyword> — download matching files as ZIP\n"
-        "/logout — disconnect your account"
+    uid = _uid(update)
+    # Check if the user is already authenticated
+    from db.models import get_user
+    user = get_user(uid)
+    is_auth = bool(user and user["token"])
+
+    if is_auth:
+        text = (
+            "👋 Welcome back!\n\n"
+            "Your Google Drive is connected. Use the menu below."
+        )
+    else:
+        text = (
+            "👋 Welcome to *Google Drive Bot*\n\n"
+            "Manage your Google Drive files directly from Telegram.\n"
+            "Connect your account to get started."
+        )
+
+    await update.message.reply_text(
+        text,
+        reply_markup=ui.start_keyboard(is_auth),
+        parse_mode="Markdown",
     )
-    await update.message.reply_text(msg)
+
+
+async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(
+        formatter.main_menu(),
+        reply_markup=ui.main_menu_keyboard(),
+    )
+
+
+async def cmd_tools(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(
+        formatter.tools_menu(),
+        reply_markup=ui.back_to_menu_keyboard(),
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# /login
+# /login  /logout
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def cmd_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -78,157 +106,61 @@ async def cmd_login(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         url = drive_auth.get_auth_url(uid)
         await update.message.reply_text(
-            f"🔐 Click the link below to authorize access:\n\n{url}\n\n"
-            "After authorizing, the bot will confirm automatically."
+            f"🔐 Authorize Access\n\n"
+            f"Click the link below to connect your Google account:\n{url}\n\n"
+            f"Once authorized, return here and tap the button below.",
+            reply_markup=ui.main_menu_keyboard(),
         )
     except FileNotFoundError:
         await update.message.reply_text(
-            "❌ credentials.json not found. Please place your Google OAuth credentials file "
-            "in the project root."
+            formatter.error(
+                "credentials.json not found",
+                "Place your Google OAuth credentials file in the project root directory.",
+            )
         )
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# /logout
-# ─────────────────────────────────────────────────────────────────────────────
 
 async def cmd_logout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    from db.models import delete_user
     uid = _uid(update)
-    delete_user(uid)
-    _folder_stack.pop(uid, None)
-    await update.message.reply_text("✅ Logged out. Your tokens have been deleted.")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# /folders
-# ─────────────────────────────────────────────────────────────────────────────
-
-async def cmd_folders(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    uid = _uid(update)
-    try:
-        folders = ds.list_folders(uid, parent_id=_folder(uid))
-        location = _breadcrumb(uid)
-        await update.message.reply_text(
-            f"📍 Location: {location}\n\n"
-            f"📁 Folders:\n\n{p.format_folder_list(folders)}"
-        )
-    except PermissionError as e:
-        await update.message.reply_text(f"🔒 {e}")
-    except Exception as e:
-        logger.exception("cmd_folders error")
-        await update.message.reply_text(f"❌ Error: {e}")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# /open <folder_name>
-# ─────────────────────────────────────────────────────────────────────────────
-
-async def cmd_open(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    uid = _uid(update)
-    args = p.parse_args(update.message.text, "/open")
-    if not args:
-        await update.message.reply_text("Usage: /open <folder_name>")
-        return
-    folder_name = " ".join(args)
-    try:
-        folder = ds.open_folder(uid, folder_name, parent_id=_folder(uid))
-        if folder:
-            _stack(uid).append((folder["id"], folder["name"]))
-            await update.message.reply_text(
-                f"📂 Opened: {folder['name']}\n"
-                f"📍 Path: {_breadcrumb(uid)}"
-            )
-        else:
-            await update.message.reply_text(f"❌ Folder '{folder_name}' not found.")
-    except PermissionError as e:
-        await update.message.reply_text(f"🔒 {e}")
-    except Exception as e:
-        logger.exception("cmd_open error")
-        await update.message.reply_text(f"❌ Error: {e}")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# /cd  (go back one level)
-# ─────────────────────────────────────────────────────────────────────────────
-
-async def cmd_cd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    uid = _uid(update)
-    stack = _stack(uid)
-    if len(stack) <= 1:
-        await update.message.reply_text("🏠 Already at Home. Can't go further back.")
-        return
-    stack.pop()
+    models.delete_user(uid)
+    nav.clear_user(uid)
     await update.message.reply_text(
-        f"⬆️ Went back.\n"
-        f"📍 Now at: {_breadcrumb(uid)}"
+        formatter.success("Logout"),
+        reply_markup=ui.main_menu_keyboard(),
     )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# /pwd  (show current path)
+# /browse  /back
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def cmd_pwd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_browse(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     uid = _uid(update)
-    await update.message.reply_text(f"📍 Current location: {_breadcrumb(uid)}")
+
+    async def send(text, markup):
+        if markup:
+            await update.message.reply_text(text, reply_markup=markup)
+        else:
+            await update.message.reply_text(text)
+
+    await _send_browse(uid, send)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# /list
-# ─────────────────────────────────────────────────────────────────────────────
-
-async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     uid = _uid(update)
-    try:
-        files = ds.list_files(uid, parent_id=_folder(uid))
-        location = _breadcrumb(uid)
-        await update.message.reply_text(
-            f"📍 Location: {location}\n\n"
-            f"📜 Files:\n\n{p.format_file_list(files)}"
-        )
-    except PermissionError as e:
-        await update.message.reply_text(f"🔒 {e}")
-    except Exception as e:
-        logger.exception("cmd_list error")
-        await update.message.reply_text(f"❌ Error: {e}")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# /get <filename>
-# ─────────────────────────────────────────────────────────────────────────────
-
-async def cmd_get(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    uid = _uid(update)
-    args = p.parse_args(update.message.text, "/get")
-    if not args:
-        await update.message.reply_text("Usage: /get <filename>")
+    went_back = nav.pop_folder(uid)
+    if not went_back:
+        await update.message.reply_text("🏠 Already at Home folder.")
         return
-    filename = " ".join(args)
-    try:
-        file_meta = ds.find_file_by_name(uid, filename)
-        if not file_meta:
-            await update.message.reply_text(f"❌ File '{filename}' not found.")
-            return
-        await update.message.reply_text(f"⬇️ Downloading {filename}...")
-        file_bytes, fname = ds.download_file(uid, file_meta["id"])
-        await update.message.reply_document(
-            document=io.BytesIO(file_bytes),
-            filename=fname,
-        )
-    except PermissionError as e:
-        await update.message.reply_text(f"🔒 {e}")
-    except Exception as e:
-        logger.exception("cmd_get error")
-        await update.message.reply_text(f"❌ Error: {e}")
+    await cmd_browse(update, context)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# /search <keyword>
+# /search
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    uid = _uid(update)
+    uid  = _uid(update)
     args = p.parse_args(update.message.text, "/search")
     if not args:
         await update.message.reply_text("Usage: /search <keyword>")
@@ -237,71 +169,184 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     try:
         files = ds.search_files(uid, keyword)
         await update.message.reply_text(
-            f"🔍 Search results for '{keyword}':\n\n{p.format_file_list(files)}"
+            formatter.search_results(keyword, files),
+            reply_markup=ui.back_to_menu_keyboard(),
         )
-    except PermissionError as e:
-        await update.message.reply_text(f"🔒 {e}")
+    except PermissionError:
+        await update.message.reply_text(formatter.login_required())
     except Exception as e:
-        logger.exception("cmd_search error")
-        await update.message.reply_text(f"❌ Error: {e}")
+        await update.message.reply_text(formatter.error(str(e)))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# /rename <old_name> <new_name>
+# /recent  /favorites
 # ─────────────────────────────────────────────────────────────────────────────
+
+async def cmd_recent(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = _uid(update)
+    try:
+        files = ds.get_recent_files(uid)
+        await update.message.reply_text(
+            formatter.search_results("Recent Files", files),
+            reply_markup=ui.back_to_menu_keyboard(),
+        )
+    except PermissionError:
+        await update.message.reply_text(formatter.login_required())
+    except Exception as e:
+        await update.message.reply_text(formatter.error(str(e)))
+
+
+async def cmd_favorites(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    uid     = _uid(update)
+    fav_ids = models.get_favorites(uid)
+    files   = []
+    for fid in fav_ids:
+        try:
+            files.append(ds.get_file_metadata(uid, fid))
+        except Exception:
+            continue
+    await update.message.reply_text(
+        formatter.search_results("⭐ Favorites", files),
+        reply_markup=ui.back_to_menu_keyboard(),
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# /info  /rename  /move  /delete  /create_folder
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def cmd_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    uid  = _uid(update)
+    args = p.parse_args(update.message.text, "/info")
+    if not args:
+        await update.message.reply_text("Usage: /info <filename>")
+        return
+    filename = " ".join(args)
+    try:
+        fm = ds.find_file_by_name(uid, filename)
+        if not fm:
+            await update.message.reply_text(
+                formatter.error(f"File '{filename}' not found.", "Use /search to locate it.")
+            )
+            return
+        meta = ds.get_file_metadata(uid, fm["id"])
+        await update.message.reply_text(
+            formatter.file_info(meta),
+            reply_markup=ui.file_actions_keyboard(fm["id"], models.is_favorite(uid, fm["id"])),
+        )
+    except PermissionError:
+        await update.message.reply_text(formatter.login_required())
+    except Exception as e:
+        await update.message.reply_text(formatter.error(str(e)))
+
 
 async def cmd_rename(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    uid = _uid(update)
+    uid  = _uid(update)
     args = p.parse_args(update.message.text, "/rename")
     if len(args) < 2:
         await update.message.reply_text("Usage: /rename <old_name> <new_name>")
         return
-    old_name, new_name = args[0], " ".join(args[1:])
+    old_name = args[0]
+    new_name = " ".join(args[1:])
     try:
-        file_meta = ds.find_file_by_name(uid, old_name)
-        if not file_meta:
-            await update.message.reply_text(f"❌ File '{old_name}' not found.")
+        fm = ds.find_file_by_name(uid, old_name)
+        if not fm:
+            await update.message.reply_text(
+                formatter.error(f"File '{old_name}' not found.", "Use /search to locate it.")
+            )
             return
-        updated = ds.rename_file(uid, file_meta["id"], new_name)
-        await update.message.reply_text(f"✏️ Renamed to: {updated['name']}")
-    except PermissionError as e:
-        await update.message.reply_text(f"🔒 {e}")
+        updated = ds.rename_file(uid, fm["id"], new_name)
+        await update.message.reply_text(
+            formatter.success("Rename", updated["name"]),
+            reply_markup=ui.back_to_menu_keyboard(),
+        )
+    except PermissionError:
+        await update.message.reply_text(formatter.login_required())
     except Exception as e:
-        logger.exception("cmd_rename error")
-        await update.message.reply_text(f"❌ Error: {e}")
+        await update.message.reply_text(formatter.error(str(e)))
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# /delete <filename>
-# ─────────────────────────────────────────────────────────────────────────────
+async def cmd_move(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    uid  = _uid(update)
+    args = p.parse_args(update.message.text, "/move")
+    if len(args) < 2:
+        await update.message.reply_text("Usage: /move <file_name> <folder_name>")
+        return
+    file_name   = args[0]
+    folder_name = " ".join(args[1:])
+    try:
+        fm = ds.find_file_by_name(uid, file_name)
+        if not fm:
+            await update.message.reply_text(
+                formatter.error(f"File '{file_name}' not found.", "Use /search to locate it.")
+            )
+            return
+        tf = ds.open_folder(uid, folder_name)
+        if not tf:
+            await update.message.reply_text(
+                formatter.error(f"Folder '{folder_name}' not found.")
+            )
+            return
+        ds.move_file(uid, fm["id"], tf["id"])
+        await update.message.reply_text(
+            formatter.success("Move", file_name, folder_name),
+            reply_markup=ui.back_to_menu_keyboard(),
+        )
+    except PermissionError:
+        await update.message.reply_text(formatter.login_required())
+    except Exception as e:
+        await update.message.reply_text(formatter.error(str(e)))
+
 
 async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    uid = _uid(update)
+    uid  = _uid(update)
     args = p.parse_args(update.message.text, "/delete")
     if not args:
         await update.message.reply_text("Usage: /delete <filename>")
         return
     filename = " ".join(args)
     try:
-        file_meta = ds.find_file_by_name(uid, filename)
-        if not file_meta:
-            await update.message.reply_text(f"❌ File '{filename}' not found.")
+        fm = ds.find_file_by_name(uid, filename)
+        if not fm:
+            await update.message.reply_text(
+                formatter.error(f"File '{filename}' not found.", "Use /search to locate it.")
+            )
             return
-        ds.delete_file(uid, file_meta["id"])
-        await update.message.reply_text(f"🗑️ Deleted: {filename}")
-    except PermissionError as e:
-        await update.message.reply_text(f"🔒 {e}")
+        await update.message.reply_text(
+            formatter.confirm_action("Delete", filename),
+            reply_markup=ui.confirm_keyboard("delete", fm["id"]),
+        )
+    except PermissionError:
+        await update.message.reply_text(formatter.login_required())
     except Exception as e:
-        logger.exception("cmd_delete error")
-        await update.message.reply_text(f"❌ Error: {e}")
+        await update.message.reply_text(formatter.error(str(e)))
+
+
+async def cmd_create_folder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    uid  = _uid(update)
+    args = p.parse_args(update.message.text, "/create_folder")
+    if not args:
+        await update.message.reply_text("Usage: /create_folder <name>")
+        return
+    name = " ".join(args)
+    try:
+        created = ds.create_folder(uid, name, parent_id=nav.current_folder_id(uid))
+        await update.message.reply_text(
+            formatter.success("Folder Created", created["name"], nav.breadcrumb(uid)),
+            reply_markup=ui.back_to_menu_keyboard(),
+        )
+    except PermissionError:
+        await update.message.reply_text(formatter.login_required())
+    except Exception as e:
+        await update.message.reply_text(formatter.error(str(e)))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# /zip <keyword>
+# /zip
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def cmd_zip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    uid = _uid(update)
+    uid  = _uid(update)
     args = p.parse_args(update.message.text, "/zip")
     if not args:
         await update.message.reply_text("Usage: /zip <keyword>")
@@ -310,10 +355,14 @@ async def cmd_zip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         files = ds.search_files(uid, keyword)
         if not files:
-            await update.message.reply_text(f"❌ No files found matching '{keyword}'.")
+            await update.message.reply_text(
+                formatter.error(f"No files matched '{keyword}'.", "Try a different keyword.")
+            )
             return
 
-        await update.message.reply_text(f"📦 Found {len(files)} file(s). Creating ZIP...")
+        total = sum(int(f.get("size", 0)) for f in files)
+        size_str = p.human_size(total) if total else "Unknown"
+        await update.message.reply_text(formatter.zip_preparing(len(files), size_str))
 
         collected: list[tuple[bytes, str]] = []
         for f in files:
@@ -321,21 +370,23 @@ async def cmd_zip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 file_bytes, fname = ds.download_file(uid, f["id"])
                 collected.append((file_bytes, fname))
             except Exception:
-                logger.warning("Could not download %s for ZIP", f["name"])
+                logger.warning("Skipping %s in ZIP — download failed", f["name"])
 
         if not collected:
-            await update.message.reply_text("❌ Could not download any files.")
+            await update.message.reply_text(
+                formatter.error("Could not download any files for the archive.")
+            )
             return
 
         zip_bytes = create_zip(collected)
-        zip_name = f"{keyword}_files.zip"
+        zip_name  = f"{keyword}_files.zip"
         await update.message.reply_document(
             document=io.BytesIO(zip_bytes),
             filename=zip_name,
-            caption=f"📦 {len(collected)} file(s) zipped as {zip_name}",
+            caption=formatter.zip_ready(zip_name, len(collected)),
         )
-    except PermissionError as e:
-        await update.message.reply_text(f"🔒 {e}")
+    except PermissionError:
+        await update.message.reply_text(formatter.login_required())
     except Exception as e:
         logger.exception("cmd_zip error")
-        await update.message.reply_text(f"❌ Error: {e}")
+        await update.message.reply_text(formatter.error(str(e)))

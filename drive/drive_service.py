@@ -35,21 +35,18 @@ def list_folders(telegram_id: int, parent_id: str = "root") -> list[dict]:
     )
     result = svc.files().list(
         q=q,
-        fields="files(id, name)",
+        fields="files(id, name, mimeType)",   # mimeType required for browse_keyboard routing
         pageSize=50,
     ).execute()
     return result.get("files", [])
 
 
-def open_folder(telegram_id: int, folder_name: str, parent_id: str = "root") -> Optional[dict]:
-    """Return the first folder matching folder_name under parent_id."""
+def open_folder(telegram_id: int, folder_name: str, parent_id: Optional[str] = None) -> Optional[dict]:
+    """Return the first folder matching folder_name, optionally under parent_id."""
     svc = _service(telegram_id)
-    q = (
-        f"'{parent_id}' in parents "
-        f"and mimeType='{FOLDER_MIME}' "
-        f"and name='{folder_name}' "
-        f"and trashed=false"
-    )
+    q = f"mimeType='{FOLDER_MIME}' and name='{folder_name}' and trashed=false"
+    if parent_id:
+        q = f"'{parent_id}' in parents and " + q
     result = svc.files().list(q=q, fields="files(id, name)", pageSize=1).execute()
     files = result.get("files", [])
     return files[0] if files else None
@@ -71,7 +68,6 @@ def list_files(telegram_id: int, parent_id: str = "root") -> list[dict]:
     ).execute()
     return result.get("files", [])
 
-
 def search_files(telegram_id: int, keyword: str) -> list[dict]:
     svc = _service(telegram_id)
     q = f"name contains '{keyword}' and trashed=false"
@@ -81,6 +77,47 @@ def search_files(telegram_id: int, keyword: str) -> list[dict]:
         pageSize=50,
     ).execute()
     return result.get("files", [])
+
+
+def get_recent_files(telegram_id: int, limit: int = 10) -> list[dict]:
+    svc = _service(telegram_id)
+    result = svc.files().list(
+        orderBy="viewedByMeTime desc",
+        pageSize=limit,
+        fields="files(id, name, mimeType)",
+        q="trashed=false"
+    ).execute()
+    return result.get("files", [])
+
+
+def get_file_metadata(telegram_id: int, file_id: str) -> dict:
+    svc = _service(telegram_id)
+    return svc.files().get(
+        fileId=file_id,
+        fields="id, name, mimeType, size, createdTime, parents, webViewLink, webContentLink"
+    ).execute()
+
+
+def move_file(telegram_id: int, file_id: str, new_parent_id: str) -> dict:
+    svc = _service(telegram_id)
+    file = svc.files().get(fileId=file_id, fields="parents").execute()
+    previous_parents = ",".join(file.get("parents", []))
+    return svc.files().update(
+        fileId=file_id,
+        addParents=new_parent_id,
+        removeParents=previous_parents,
+        fields="id, parents"
+    ).execute()
+
+
+def create_folder(telegram_id: int, name: str, parent_id: str = "root") -> dict:
+    svc = _service(telegram_id)
+    file_metadata = {
+        "name": name,
+        "mimeType": FOLDER_MIME,
+        "parents": [parent_id]
+    }
+    return svc.files().create(body=file_metadata, fields="id, name").execute()
 
 
 def upload_file(
@@ -104,19 +141,48 @@ def upload_file(
     return uploaded
 
 
-def download_file(telegram_id: int, file_id: str) -> tuple[bytes, str]:
-    """Return (file_bytes, filename)."""
-    svc = _service(telegram_id)
-    meta = svc.files().get(fileId=file_id, fields="name").execute()
-    filename = meta["name"]
+# Google Workspace MIME types must be exported rather than downloaded directly.
+# Maps Google mime → (export mime, file extension)
+_GOOGLE_EXPORT_MAP: dict[str, tuple[str, str]] = {
+    "application/vnd.google-apps.document":     ("application/vnd.openxmlformats-officedocument.wordprocessingml.document",  ".docx"),
+    "application/vnd.google-apps.spreadsheet":  ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",        ".xlsx"),
+    "application/vnd.google-apps.presentation": ("application/vnd.openxmlformats-officedocument.presentationml.presentation", ".pptx"),
+    "application/vnd.google-apps.drawing":      ("image/png",        ".png"),
+    "application/vnd.google-apps.form":         ("application/pdf",  ".pdf"),
+    "application/vnd.google-apps.script":       ("application/json", ".json"),
+}
 
-    request = svc.files().get_media(fileId=file_id)
+
+def download_file(telegram_id: int, file_id: str) -> tuple[bytes, str]:
+    """
+    Return (file_bytes, filename).
+    Automatically exports Google Workspace files (Docs, Sheets, Slides, etc.)
+    to a compatible Office format instead of attempting a direct binary download.
+    """
+    svc  = _service(telegram_id)
+    meta = svc.files().get(fileId=file_id, fields="name, mimeType").execute()
+    filename  = meta["name"]
+    mime_type = meta.get("mimeType", "")
+
     buf = io.BytesIO()
+
+    if mime_type in _GOOGLE_EXPORT_MAP:
+        # Google Workspace file — must be exported/converted
+        export_mime, ext = _GOOGLE_EXPORT_MAP[mime_type]
+        if not filename.endswith(ext):
+            filename += ext                         # e.g. "My Doc" → "My Doc.docx"
+        request = svc.files().export_media(fileId=file_id, mimeType=export_mime)
+    else:
+        # Regular binary file — direct download
+        request = svc.files().get_media(fileId=file_id)
+
     downloader = MediaIoBaseDownload(buf, request)
     done = False
     while not done:
         _, done = downloader.next_chunk()
+
     return buf.getvalue(), filename
+
 
 
 def rename_file(telegram_id: int, file_id: str, new_name: str) -> dict:

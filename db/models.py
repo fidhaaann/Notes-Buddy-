@@ -33,6 +33,12 @@ def init_db() -> None:
                 type        TEXT,
                 uploaded_at TEXT DEFAULT (datetime('now'))
             );
+
+            CREATE TABLE IF NOT EXISTS favorites (
+                telegram_id INTEGER,
+                file_id     TEXT,
+                PRIMARY KEY (telegram_id, file_id)
+            );
             """
         )
 
@@ -76,3 +82,36 @@ def log_file(file_id: str, name: str, mime_type: str = None) -> None:
             """,
             (file_id, name, mime_type),
         )
+
+
+# ── Favorite helpers ──────────────────────────────────────────────────────────
+
+def add_favorite(telegram_id: int, file_id: str) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO favorites (telegram_id, file_id) VALUES (?, ?)",
+            (telegram_id, file_id),
+        )
+
+def remove_favorite(telegram_id: int, file_id: str) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            "DELETE FROM favorites WHERE telegram_id = ? AND file_id = ?",
+            (telegram_id, file_id),
+        )
+
+def is_favorite(telegram_id: int, file_id: str) -> bool:
+    with get_connection() as conn:
+        res = conn.execute(
+            "SELECT 1 FROM favorites WHERE telegram_id = ? AND file_id = ?",
+            (telegram_id, file_id),
+        ).fetchone()
+        return res is not None
+
+def get_favorites(telegram_id: int) -> list[str]:
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT file_id FROM favorites WHERE telegram_id = ?",
+            (telegram_id,),
+        ).fetchall()
+        return [row["file_id"] for row in rows]
