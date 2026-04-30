@@ -8,9 +8,12 @@ import asyncio
 import logging
 import os
 
+from dotenv import load_dotenv
+load_dotenv()   # ← loads .env before anything reads env vars
+
 import uvicorn
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 from telegram.ext import Application
 
@@ -27,19 +30,29 @@ logger = logging.getLogger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-HOST = os.environ.get("HOST", "0.0.0.0")
-PORT = int(os.environ.get("PORT", "8000"))
+HOST      = os.environ.get("HOST", "0.0.0.0")
+PORT      = int(os.environ.get("PORT", "8000"))
+
+# ── Globals set after bot starts ──────────────────────────────────────────────
+# These let the OAuth callback reach the running bot instance.
+_bot_app: Application | None = None
+_bot_username: str | None    = None
 
 # ── FastAPI app ───────────────────────────────────────────────────────────────
 web_app = FastAPI(title="Drive Bot OAuth Server")
 
 
-@web_app.get("/oauth/callback", response_class=HTMLResponse)
+@web_app.get("/oauth/callback")
 async def oauth_callback(request: Request):
-    """Google redirects here after the user authorizes access."""
+    """
+    Google redirects here after the user authorizes access.
+    After exchanging the code:
+      1. Sends a Telegram message to the user (login success + main menu).
+      2. Redirects the browser straight back to the Telegram bot.
+    """
     params = dict(request.query_params)
-    code = params.get("code")
-    state = params.get("state")  # telegram_id
+    code   = params.get("code")
+    state  = params.get("state")   # telegram_id passed as OAuth state
 
     if not code or not state:
         return HTMLResponse("<h2>❌ Missing parameters.</h2>", status_code=400)
@@ -47,13 +60,81 @@ async def oauth_callback(request: Request):
     try:
         telegram_id = int(state)
         exchange_code(code, telegram_id)
+
+        # ── Notify the user inside Telegram ───────────────────────────────────
+        if _bot_app is not None:
+            from bot.ui import main_menu_keyboard
+            try:
+                await _bot_app.bot.send_message(
+                    chat_id=telegram_id,
+                    text=(
+                        "✅ Google Drive Connected!\n\n"
+                        "Your account has been authorized successfully.\n"
+                        "Use the menu below to start managing your files."
+                    ),
+                    reply_markup=main_menu_keyboard(),
+                )
+            except Exception:
+                logger.warning("Could not send success message to user %s", telegram_id)
+
+        # ── Redirect browser back to the Telegram bot ─────────────────────────
+        if _bot_username:
+            # Opens the Telegram app directly on mobile / desktop
+            redirect_url = f"https://t.me/{_bot_username}"
+        else:
+            redirect_url = "https://t.me"
+
+        # Show a brief page first, then redirect — works on all platforms
         return HTMLResponse(
-            "<h2>✅ Authorization successful!</h2>"
-            "<p>You can close this tab and return to Telegram.</p>"
+            f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="refresh" content="3;url={redirect_url}">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Authorization Successful</title>
+  <style>
+    body {{
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      display: flex; flex-direction: column; align-items: center;
+      justify-content: center; min-height: 100vh; margin: 0;
+      background: #17212b; color: #fff; text-align: center;
+    }}
+    .card {{
+      background: #232e3c; border-radius: 16px; padding: 40px 48px;
+      box-shadow: 0 8px 32px rgba(0,0,0,.4); max-width: 380px;
+    }}
+    .icon {{ font-size: 64px; margin-bottom: 16px; }}
+    h1 {{ margin: 0 0 8px; font-size: 24px; }}
+    p  {{ color: #8b9aaa; margin: 0 0 24px; font-size: 15px; }}
+    a  {{
+      display: inline-block;
+      background: #2ea6ff; color: #fff; text-decoration: none;
+      padding: 12px 28px; border-radius: 10px; font-size: 15px;
+      font-weight: 600; transition: background .2s;
+    }}
+    a:hover {{ background: #1a8fe0; }}
+    small {{ display:block; margin-top:16px; color:#566575; font-size:13px; }}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="icon">✅</div>
+    <h1>Authorization Successful!</h1>
+    <p>Your Google Drive has been connected.<br>Redirecting you back to Telegram…</p>
+    <a href="{redirect_url}">↩ Open Telegram</a>
+    <small>Redirecting automatically in 3 seconds…</small>
+  </div>
+</body>
+</html>"""
         )
+
     except Exception as e:
         logger.exception("OAuth callback error")
-        return HTMLResponse(f"<h2>❌ Error: {e}</h2>", status_code=500)
+        return HTMLResponse(
+            f"<h2>❌ Authorization failed</h2><p>{e}</p>",
+            status_code=500,
+        )
 
 
 @web_app.get("/health")
@@ -66,7 +147,7 @@ def build_bot() -> Application:
     if not BOT_TOKEN:
         raise RuntimeError(
             "TELEGRAM_BOT_TOKEN environment variable is not set.\n"
-            "Export it before running:  export TELEGRAM_BOT_TOKEN=<your-token>"
+            "Add it to your .env file and restart."
         )
     app = Application.builder().token(BOT_TOKEN).build()
     register_handlers(app)
@@ -75,29 +156,32 @@ def build_bot() -> Application:
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 async def main() -> None:
+    global _bot_app, _bot_username
+
     # Initialise DB
     init_db()
     logger.info("Database initialised.")
 
-    # Build bot
-    bot_app = build_bot()
+    # Build & start bot
+    _bot_app = build_bot()
+    await _bot_app.initialize()
+    await _bot_app.start()
+    await _bot_app.updater.start_polling(drop_pending_updates=True)
 
-    # Start polling (non-blocking)
-    await bot_app.initialize()
-    await bot_app.start()
-    await bot_app.updater.start_polling(drop_pending_updates=True)
-    logger.info("Telegram bot started (polling).")
+    # Store the bot's username so the OAuth callback can build the redirect URL
+    _bot_username = _bot_app.bot.username
+    logger.info("Telegram bot started (polling) as @%s.", _bot_username)
 
-    # Start FastAPI
+    # Start FastAPI (OAuth server)
     config = uvicorn.Config(web_app, host=HOST, port=PORT, log_level="info")
     server = uvicorn.Server(config)
-    logger.info(f"OAuth server listening on http://{HOST}:{PORT}")
+    logger.info("OAuth server listening on http://%s:%s", HOST, PORT)
     await server.serve()
 
     # Graceful shutdown
-    await bot_app.updater.stop()
-    await bot_app.stop()
-    await bot_app.shutdown()
+    await _bot_app.updater.stop()
+    await _bot_app.stop()
+    await _bot_app.shutdown()
 
 
 if __name__ == "__main__":
