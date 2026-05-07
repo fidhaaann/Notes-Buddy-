@@ -55,20 +55,22 @@ web_app = FastAPI(
 async def oauth_callback(request: Request):
     """
     Google redirects here after the user authorizes access.
-    After exchanging the code:
+    After exchanging the code (with CSRF nonce verification):
       1. Sends a Telegram message to the user (login success + main menu).
       2. Redirects the browser straight back to the Telegram bot.
     """
+    from html import escape
+
     params = dict(request.query_params)
     code   = params.get("code")
-    state  = params.get("state")   # telegram_id passed as OAuth state
+    state  = params.get("state")   # format: "telegram_id:nonce"
 
     if not code or not state:
         return HTMLResponse("<h2>❌ Missing parameters.</h2>", status_code=400)
 
     try:
-        telegram_id = int(state)
-        exchange_code(code, telegram_id)
+        # exchange_code now parses state, verifies CSRF nonce, and returns telegram_id
+        telegram_id = exchange_code(code, state)
 
         # ── Notify the user inside Telegram ───────────────────────────────────
         if _bot_app is not None:
@@ -88,8 +90,7 @@ async def oauth_callback(request: Request):
 
         # ── Redirect browser back to the Telegram bot ─────────────────────────
         if _bot_username:
-            # Opens the Telegram app directly on mobile / desktop
-            redirect_url = f"https://t.me/{_bot_username}"
+            redirect_url = f"https://t.me/{escape(_bot_username)}"
         else:
             redirect_url = "https://t.me"
 

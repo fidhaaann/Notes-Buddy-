@@ -8,17 +8,21 @@ Supports two credential sources (checked in order):
      (preferred for production / Railway deployment)
   2. File: credentials.json in the project root
      (convenient for local development)
+
+Security:
+  - OAuth state includes a CSRF nonce verified on callback.
 """
 
 import json
 import logging
 import os
+import secrets
 
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from google.auth.transport.requests import Request
 
-from db.models import get_user, upsert_user
+from db.models import get_user, upsert_user, store_oauth_state, verify_oauth_state
 
 logger = logging.getLogger(__name__)
 
@@ -38,9 +42,6 @@ def _get_client_config() -> dict:
     Priority:
       1. GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET env vars  → production
       2. credentials.json file                              → local dev
-
-    Returns a dict in the format expected by
-    google_auth_oauthlib.flow.Flow.from_client_config().
     """
     client_id     = os.environ.get("GOOGLE_CLIENT_ID")
     client_secret = os.environ.get("GOOGLE_CLIENT_SECRET")
@@ -57,9 +58,8 @@ def _get_client_config() -> dict:
             }
         }
 
-    # Fallback: read from file
     if os.path.isfile(CREDENTIALS_FILE):
-        logger.info("Using OAuth credentials from %s.", CREDENTIALS_FILE)
+        logger.debug("Using OAuth credentials from %s.", CREDENTIALS_FILE)
         with open(CREDENTIALS_FILE) as f:
             return json.load(f)
 
@@ -81,20 +81,46 @@ def _build_flow() -> Flow:
 
 
 def get_auth_url(telegram_id: int) -> str:
-    """Return the OAuth consent URL for a user."""
+    """Return the OAuth consent URL. Includes CSRF nonce in state."""
+    nonce = secrets.token_urlsafe(32)
+    store_oauth_state(telegram_id, nonce)
+
     flow = _build_flow()
-    # Pass telegram_id as 'state' so the callback knows which user to update
     auth_url, _ = flow.authorization_url(
         access_type="offline",
         include_granted_scopes="true",
         prompt="consent",
-        state=str(telegram_id),
+        state=f"{telegram_id}:{nonce}",
     )
     return auth_url
 
 
-def exchange_code(code: str, telegram_id: int) -> None:
-    """Exchange the OAuth code for tokens and persist them."""
+def exchange_code(code: str, state: str) -> int:
+    """Exchange the OAuth code for tokens and persist them.
+
+    Args:
+        code:  The authorization code from Google.
+        state: The state parameter (format: "telegram_id:nonce").
+
+    Returns:
+        The Telegram user ID extracted from the verified state.
+
+    Raises:
+        ValueError: If state verification fails (CSRF protection).
+    """
+    parts = state.split(":", 1)
+    if len(parts) != 2:
+        raise ValueError("Invalid OAuth state format.")
+
+    try:
+        telegram_id = int(parts[0])
+    except (ValueError, TypeError):
+        raise ValueError("Invalid OAuth state: bad user ID.")
+
+    nonce = parts[1]
+    if not verify_oauth_state(telegram_id, nonce):
+        raise ValueError("OAuth state verification failed — possible CSRF. Try /login again.")
+
     flow = _build_flow()
     flow.fetch_token(code=code)
     creds = flow.credentials
@@ -104,6 +130,7 @@ def exchange_code(code: str, telegram_id: int) -> None:
         refresh_token=creds.refresh_token,
     )
     logger.info("OAuth tokens stored for user %s.", telegram_id)
+    return telegram_id
 
 
 def get_credentials(telegram_id: int) -> Credentials | None:
@@ -112,7 +139,7 @@ def get_credentials(telegram_id: int) -> Credentials | None:
     if not row or not row["token"]:
         return None
 
-    config   = _get_client_config()
+    config    = _get_client_config()
     installed = config.get("installed") or config.get("web")
 
     creds = Credentials(

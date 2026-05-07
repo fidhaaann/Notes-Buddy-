@@ -163,12 +163,17 @@ _GOOGLE_EXPORT_MAP: dict[str, tuple[str, str]] = {
     "application/vnd.google-apps.script":       ("application/json", ".json"),
 }
 
+# Max download size — matches Telegram bot API limit (45 MB safe margin)
+MAX_DOWNLOAD_BYTES = 45 * 1024 * 1024
+
 
 def download_file(telegram_id: int, file_id: str) -> tuple[bytes, str]:
     """
     Return (file_bytes, filename).
     Automatically exports Google Workspace files (Docs, Sheets, Slides, etc.)
     to a compatible Office format instead of attempting a direct binary download.
+
+    Raises ValueError if the download exceeds MAX_DOWNLOAD_BYTES.
     """
     svc  = _service(telegram_id)
     meta = svc.files().get(fileId=file_id, fields="name, mimeType").execute()
@@ -191,6 +196,10 @@ def download_file(telegram_id: int, file_id: str) -> tuple[bytes, str]:
     done = False
     while not done:
         _, done = downloader.next_chunk()
+        if buf.tell() > MAX_DOWNLOAD_BYTES:
+            raise ValueError(
+                f"File exceeds {MAX_DOWNLOAD_BYTES // (1024 * 1024)} MB download limit."
+            )
 
     return buf.getvalue(), filename
 
