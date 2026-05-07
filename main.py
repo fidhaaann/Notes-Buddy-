@@ -42,6 +42,80 @@ PORT      = int(os.environ.get("PORT", "8000"))
 _bot_app: Application | None = None
 _bot_username: str | None    = None
 
+# ── OAuth success page template ───────────────────────────────────────────────
+# Plain string (not f-string) so linters don't try to parse HTML/JS as Python.
+# Placeholders {{WEB_URL}} and {{APP_URL}} are replaced at runtime.
+_SUCCESS_PAGE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Authorization Successful</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      display: flex; flex-direction: column; align-items: center;
+      justify-content: center; min-height: 100vh; margin: 0;
+      background: #17212b; color: #fff; text-align: center;
+    }
+    .card {
+      background: #232e3c; border-radius: 16px; padding: 40px 48px;
+      box-shadow: 0 8px 32px rgba(0,0,0,.4); max-width: 380px;
+    }
+    .icon { font-size: 64px; margin-bottom: 16px; }
+    h1 { margin: 0 0 8px; font-size: 24px; }
+    p  { color: #8b9aaa; margin: 0 0 24px; font-size: 15px; }
+    .btn {
+      display: inline-block; color: #fff; text-decoration: none;
+      padding: 14px 32px; border-radius: 10px; font-size: 16px;
+      font-weight: 600; transition: background .2s; margin: 6px;
+      border: none; cursor: pointer;
+    }
+    .btn-primary { background: #2ea6ff; }
+    .btn-primary:hover { background: #1a8fe0; }
+    small { display:block; margin-top:16px; color:#566575; font-size:13px; }
+    #countdown { font-variant-numeric: tabular-nums; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="icon">✅</div>
+    <h1>Authorization Successful!</h1>
+    <p>Your Google Drive has been connected.<br>You can now return to Telegram.</p>
+    <div>
+      <a class="btn btn-primary" href="{{WEB_URL}}" id="openBtn">↩ Open Telegram</a>
+    </div>
+    <small>Redirecting in <span id="countdown">3</span>s…</small>
+  </div>
+  <script>
+    var appUrl = "{{APP_URL}}";
+    var webUrl = "{{WEB_URL}}";
+    var secs = 3;
+    var counter = document.getElementById("countdown");
+    var timer = setInterval(function() {
+      secs--;
+      if (counter) counter.textContent = secs;
+      if (secs <= 0) {
+        clearInterval(timer);
+        if (appUrl) {
+          window.location.href = appUrl;
+          setTimeout(function() { window.location.href = webUrl; }, 500);
+        } else {
+          window.location.href = webUrl;
+        }
+      }
+    }, 1000);
+    document.getElementById("openBtn").addEventListener("click", function(e) {
+      if (appUrl) {
+        e.preventDefault();
+        window.location.href = appUrl;
+        setTimeout(function() { window.location.href = webUrl; }, 500);
+      }
+    });
+  </script>
+</body>
+</html>"""
+
 # ── FastAPI app ───────────────────────────────────────────────────────────────
 web_app = FastAPI(
     title="Drive Bot OAuth Server",
@@ -90,91 +164,13 @@ async def oauth_callback(request: Request):
 
         # ── Redirect browser back to the Telegram bot ─────────────────────────
         safe_username = escape(_bot_username) if _bot_username else ""
-        web_url = f"https://t.me/{safe_username}" if safe_username else "https://t.me"
+        web_url = "https://t.me/" + safe_username if safe_username else "https://t.me"
         # tg:// protocol opens Telegram app directly on mobile
-        app_url = f"tg://resolve?domain={safe_username}" if safe_username else ""
+        app_url = "tg://resolve?domain=" + safe_username if safe_username else ""
 
         # Show a brief page first, then redirect — works on all platforms
-        return HTMLResponse(
-            f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Authorization Successful</title>
-  <style>
-    body {{
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-      display: flex; flex-direction: column; align-items: center;
-      justify-content: center; min-height: 100vh; margin: 0;
-      background: #17212b; color: #fff; text-align: center;
-    }}
-    .card {{
-      background: #232e3c; border-radius: 16px; padding: 40px 48px;
-      box-shadow: 0 8px 32px rgba(0,0,0,.4); max-width: 380px;
-    }}
-    .icon {{ font-size: 64px; margin-bottom: 16px; }}
-    h1 {{ margin: 0 0 8px; font-size: 24px; }}
-    p  {{ color: #8b9aaa; margin: 0 0 24px; font-size: 15px; }}
-    .btn {{
-      display: inline-block; color: #fff; text-decoration: none;
-      padding: 14px 32px; border-radius: 10px; font-size: 16px;
-      font-weight: 600; transition: background .2s; margin: 6px;
-      border: none; cursor: pointer;
-    }}
-    .btn-primary {{ background: #2ea6ff; }}
-    .btn-primary:hover {{ background: #1a8fe0; }}
-    .btn-secondary {{ background: #3a4a5c; font-size: 13px; padding: 10px 20px; }}
-    .btn-secondary:hover {{ background: #4a5a6c; }}
-    small {{ display:block; margin-top:16px; color:#566575; font-size:13px; }}
-    #countdown {{ font-variant-numeric: tabular-nums; }}
-  </style>
-</head>
-<body>
-  <div class="card">
-    <div class="icon">✅</div>
-    <h1>Authorization Successful!</h1>
-    <p>Your Google Drive has been connected.<br>You can now return to Telegram.</p>
-    <div>
-      <a class="btn btn-primary" href="{web_url}" id="openBtn">↩ Open Telegram</a>
-    </div>
-    <small>Redirecting in <span id="countdown">3</span>s…</small>
-  </div>
-  <script>
-    // Try tg:// protocol first (opens app directly on mobile)
-    var appUrl = "{app_url}";
-    var webUrl = "{web_url}";
-
-    // Countdown display
-    var secs = 3;
-    var counter = document.getElementById("countdown");
-    var timer = setInterval(function() {{
-      secs--;
-      if (counter) counter.textContent = secs;
-      if (secs <= 0) {{
-        clearInterval(timer);
-        // Try app protocol, fall back to web URL
-        if (appUrl) {{
-          window.location.href = appUrl;
-          setTimeout(function() {{ window.location.href = webUrl; }}, 500);
-        }} else {{
-          window.location.href = webUrl;
-        }}
-      }}
-    }}, 1000);
-
-    // Button click — try app protocol first
-    document.getElementById("openBtn").addEventListener("click", function(e) {{
-      if (appUrl) {{
-        e.preventDefault();
-        window.location.href = appUrl;
-        setTimeout(function() {{ window.location.href = webUrl; }}, 500);
-      }}
-    }});
-  </script>
-</body>
-</html>"""
-        )
+        page = _SUCCESS_PAGE.replace("{{WEB_URL}}", web_url).replace("{{APP_URL}}", app_url)
+        return HTMLResponse(page)
 
     except Exception as e:
         logger.exception("OAuth callback error")
