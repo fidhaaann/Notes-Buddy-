@@ -153,6 +153,26 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 ui.back_to_menu_keyboard(),
             )
 
+        elif action == "clear":
+            chat_id = update.effective_chat.id
+            msg_id  = query.message.message_id
+            deleted = 0
+            for i in range(msg_id, max(msg_id - 100, 0), -1):
+                try:
+                    await context.bot.delete_message(chat_id=chat_id, message_id=i)
+                    deleted += 1
+                except Exception:
+                    continue
+            confirm = await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"🧹 Cleared {deleted} messages.",
+            )
+            await asyncio.sleep(3)
+            try:
+                await confirm.delete()
+            except Exception:
+                pass
+
         return
 
     # ── Folder ────────────────────────────────────────────────────────────────

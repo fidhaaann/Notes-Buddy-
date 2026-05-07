@@ -4,6 +4,7 @@ All /command handlers. Uses nav.py for state, formatter.py for messages,
 and ui.py for keyboards. No circular imports.
 """
 
+import asyncio
 import io
 import logging
 
@@ -390,3 +391,32 @@ async def cmd_zip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception as e:
         logger.exception("cmd_zip error")
         await update.message.reply_text(formatter.error(str(e)))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# /clear
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Delete recent messages in the chat (bot + user messages, up to 100)."""
+    chat_id = update.effective_chat.id
+    msg_id  = update.message.message_id
+
+    deleted = 0
+    for i in range(msg_id, max(msg_id - 100, 0), -1):
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=i)
+            deleted += 1
+        except Exception:
+            continue
+
+    # Send a brief confirmation that auto-deletes after 3 seconds
+    confirm = await context.bot.send_message(
+        chat_id=chat_id,
+        text=f"🧹 Cleared {deleted} messages.",
+    )
+    await asyncio.sleep(3)
+    try:
+        await confirm.delete()
+    except Exception:
+        pass

@@ -31,6 +31,7 @@ from bot.commands import (
     cmd_delete,
     cmd_zip,
     cmd_create_folder,
+    cmd_clear,
 )
 from bot.callbacks import handle_callback
 from bot import formatter, nav
@@ -93,6 +94,7 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("delete",        cmd_delete))
     app.add_handler(CommandHandler("zip",           cmd_zip))
     app.add_handler(CommandHandler("create_folder", cmd_create_folder))
+    app.add_handler(CommandHandler("clear",         cmd_clear))
 
     # ── Inline keyboard callbacks ─────────────────────────────────────────────
     app.add_handler(CallbackQueryHandler(handle_callback))

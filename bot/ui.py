@@ -48,7 +48,8 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📌 Recent Files",   callback_data="nav:recent"),
          InlineKeyboardButton("⭐ Favorites",       callback_data="nav:favorites")],
         [InlineKeyboardButton("🛠 Tools & Commands", callback_data="nav:tools"),
-         InlineKeyboardButton("🔓 Logout",          callback_data="nav:logout")],
+         InlineKeyboardButton("🧹 Clear Chat",      callback_data="nav:clear")],
+        [InlineKeyboardButton("🔓 Logout",          callback_data="nav:logout")],
     ])
 
 
