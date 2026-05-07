@@ -21,7 +21,7 @@ from fastapi.responses import HTMLResponse
 
 from telegram.ext import Application
 
-from db.models import init_db
+from db.models import init_db, cleanup_expired_states
 from bot.handlers import register_handlers
 from drive.auth import exchange_code
 
@@ -190,6 +190,7 @@ async def main() -> None:
 
     # Initialise DB
     init_db()
+    cleanup_expired_states()
     logger.info("Database initialised.")
 
     # Build & start bot

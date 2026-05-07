@@ -21,7 +21,3 @@ def human_size(size_bytes: int) -> str:
             return f"{size_bytes:.1f} {unit}"
         size_bytes /= 1024
     return f"{size_bytes:.1f} TB"
-
-
-# Legacy alias kept for backwards compatibility
-_human_size = human_size

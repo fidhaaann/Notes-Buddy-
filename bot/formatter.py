@@ -62,9 +62,6 @@ def file_listing(folder_name: str, path: str, files: List[Dict], folders: List[D
     return msg.strip()
 
 
-def empty_state(location: str) -> str:
-    return f"📍 Path: {location}\n\n📭 No files found in this location.\nSuggestion: Use /search to locate a file."
-
 
 def search_results(keyword: str, files: List[Dict]) -> str:
     if not files:
@@ -154,5 +151,7 @@ def tools_menu() -> str:
         "  Send any file directly to this chat\n\n"
         "🔐 Account\n"
         "  /login — Connect Google Drive\n"
-        "  /logout — Disconnect account\n"
+        "  /logout — Disconnect account\n\n"
+        "🧹 Utilities\n"
+        "  /clear — Clear recent chat messages\n"
     )
