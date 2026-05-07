@@ -17,7 +17,7 @@ load_dotenv()   # ← loads .env before anything reads env vars
 
 import uvicorn
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse
 
 from telegram.ext import Application
 
@@ -43,7 +43,12 @@ _bot_app: Application | None = None
 _bot_username: str | None    = None
 
 # ── FastAPI app ───────────────────────────────────────────────────────────────
-web_app = FastAPI(title="Drive Bot OAuth Server")
+web_app = FastAPI(
+    title="Drive Bot OAuth Server",
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
 
 
 @web_app.get("/oauth/callback")
@@ -136,7 +141,8 @@ async def oauth_callback(request: Request):
     except Exception as e:
         logger.exception("OAuth callback error")
         return HTMLResponse(
-            f"<h2>❌ Authorization failed</h2><p>{e}</p>",
+            "<h2>❌ Authorization failed</h2>"
+            "<p>Something went wrong. Please try again or contact support.</p>",
             status_code=500,
         )
 
@@ -154,7 +160,13 @@ def build_bot() -> Application:
             "  • Railway: Add it in the Variables tab of your service dashboard.\n"
             "  • Local:   Add it to your .env file and restart."
         )
-    app = Application.builder().token(BOT_TOKEN).build()
+    from telegram.ext import AIORateLimiter
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .rate_limiter(AIORateLimiter(max_retries=3))
+        .build()
+    )
     register_handlers(app)
     return app
 

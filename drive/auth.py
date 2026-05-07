@@ -46,7 +46,7 @@ def _get_client_config() -> dict:
     client_secret = os.environ.get("GOOGLE_CLIENT_SECRET")
 
     if client_id and client_secret:
-        logger.info("Using OAuth credentials from environment variables.")
+        logger.debug("Using OAuth credentials from environment variables.")
         return {
             "web": {
                 "client_id":     client_id,

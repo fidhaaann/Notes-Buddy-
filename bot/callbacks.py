@@ -157,12 +157,13 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             chat_id = update.effective_chat.id
             msg_id  = query.message.message_id
             deleted = 0
-            for i in range(msg_id, max(msg_id - 100, 0), -1):
+            for i in range(msg_id, max(msg_id - 50, 0), -1):
                 try:
                     await context.bot.delete_message(chat_id=chat_id, message_id=i)
                     deleted += 1
                 except Exception:
                     continue
+                await asyncio.sleep(0.05)  # Throttle to avoid Telegram rate limits
             confirm = await context.bot.send_message(
                 chat_id=chat_id,
                 text=f"🧹 Cleared {deleted} messages.",

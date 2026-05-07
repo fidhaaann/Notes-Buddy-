@@ -17,6 +17,15 @@ from db.models import log_file
 FOLDER_MIME = "application/vnd.google-apps.folder"
 
 
+def _sanitize_query_value(value: str) -> str:
+    """Escape special characters for Google Drive API query strings.
+    
+    Prevents query injection by escaping backslashes and single quotes
+    in user-supplied values before embedding them in query filters.
+    """
+    return value.replace("\\", "\\\\").replace("'", "\\'")
+
+
 def _service(telegram_id: int):
     creds: Credentials = get_credentials(telegram_id)
     if creds is None:
@@ -44,7 +53,8 @@ def list_folders(telegram_id: int, parent_id: str = "root") -> list[dict]:
 def open_folder(telegram_id: int, folder_name: str, parent_id: Optional[str] = None) -> Optional[dict]:
     """Return the first folder matching folder_name, optionally under parent_id."""
     svc = _service(telegram_id)
-    q = f"mimeType='{FOLDER_MIME}' and name='{folder_name}' and trashed=false"
+    safe_name = _sanitize_query_value(folder_name)
+    q = f"mimeType='{FOLDER_MIME}' and name='{safe_name}' and trashed=false"
     if parent_id:
         q = f"'{parent_id}' in parents and " + q
     result = svc.files().list(q=q, fields="files(id, name)", pageSize=1).execute()
@@ -70,7 +80,8 @@ def list_files(telegram_id: int, parent_id: str = "root") -> list[dict]:
 
 def search_files(telegram_id: int, keyword: str) -> list[dict]:
     svc = _service(telegram_id)
-    q = f"name contains '{keyword}' and trashed=false"
+    safe_keyword = _sanitize_query_value(keyword)
+    q = f"name contains '{safe_keyword}' and trashed=false"
     result = svc.files().list(
         q=q,
         fields="files(id, name, mimeType)",
@@ -198,7 +209,8 @@ def delete_file(telegram_id: int, file_id: str) -> None:
 def find_file_by_name(telegram_id: int, name: str) -> Optional[dict]:
     """Find a single non-folder file by exact name."""
     svc = _service(telegram_id)
-    q = f"name='{name}' and mimeType!='{FOLDER_MIME}' and trashed=false"
+    safe_name = _sanitize_query_value(name)
+    q = f"name='{safe_name}' and mimeType!='{FOLDER_MIME}' and trashed=false"
     result = svc.files().list(q=q, fields="files(id, name, mimeType)", pageSize=1).execute()
     files = result.get("files", [])
     return files[0] if files else None

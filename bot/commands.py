@@ -21,6 +21,10 @@ from db import models
 
 logger = logging.getLogger(__name__)
 
+# Safety limits
+MAX_ZIP_FILES = 20
+MAX_ZIP_BYTES = 100 * 1024 * 1024  # 100 MB
+
 
 def _uid(update: Update) -> int:
     return update.effective_user.id
@@ -361,7 +365,26 @@ async def cmd_zip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             return
 
+        # Enforce safety limits
+        if len(files) > MAX_ZIP_FILES:
+            await update.message.reply_text(
+                formatter.error(
+                    f"Too many files ({len(files)}).",
+                    f"ZIP is limited to {MAX_ZIP_FILES} files. Use a more specific keyword.",
+                )
+            )
+            return
+
         total = sum(int(f.get("size", 0)) for f in files)
+        if total > MAX_ZIP_BYTES:
+            await update.message.reply_text(
+                formatter.error(
+                    f"Combined size too large ({p.human_size(total)}).",
+                    f"ZIP is limited to {p.human_size(MAX_ZIP_BYTES)}. Use a more specific keyword.",
+                )
+            )
+            return
+
         size_str = p.human_size(total) if total else "Unknown"
         await update.message.reply_text(formatter.zip_preparing(len(files), size_str))
 
@@ -398,17 +421,18 @@ async def cmd_zip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Delete recent messages in the chat (bot + user messages, up to 100)."""
+    """Delete recent messages in the chat (bot + user messages, up to 50)."""
     chat_id = update.effective_chat.id
     msg_id  = update.message.message_id
 
     deleted = 0
-    for i in range(msg_id, max(msg_id - 100, 0), -1):
+    for i in range(msg_id, max(msg_id - 50, 0), -1):
         try:
             await context.bot.delete_message(chat_id=chat_id, message_id=i)
             deleted += 1
         except Exception:
             continue
+        await asyncio.sleep(0.05)  # Throttle to avoid Telegram rate limits
 
     # Send a brief confirmation that auto-deletes after 3 seconds
     confirm = await context.bot.send_message(
