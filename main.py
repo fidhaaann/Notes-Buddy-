@@ -2,6 +2,10 @@
 main.py
 Entry point — starts the FastAPI server (for OAuth callback) and the
 Telegram bot (polling) concurrently using asyncio.
+
+Production deployment (Railway):
+  Railway injects PORT as an env var. The app binds to 0.0.0.0:$PORT.
+  Set OAUTH_REDIRECT_URI to https://<app>.up.railway.app/oauth/callback.
 """
 
 import asyncio
@@ -158,6 +162,18 @@ def build_bot() -> Application:
 async def main() -> None:
     global _bot_app, _bot_username
 
+    # ── Startup banner ────────────────────────────────────────────────────────
+    railway_domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "")
+    env_label      = "Railway" if railway_domain else "Local"
+    logger.info("="*60)
+    logger.info("  Notes-Buddy — Telegram Google Drive Bot")
+    logger.info("  Environment : %s", env_label)
+    if railway_domain:
+        logger.info("  Public URL  : https://%s", railway_domain)
+    logger.info("  OAuth URI   : %s", os.environ.get("OAUTH_REDIRECT_URI", "(default localhost)"))
+    logger.info("  Server      : %s:%s", HOST, PORT)
+    logger.info("="*60)
+
     # Initialise DB
     init_db()
     logger.info("Database initialised.")
@@ -179,9 +195,11 @@ async def main() -> None:
     await server.serve()
 
     # Graceful shutdown
+    logger.info("Shutting down...")
     await _bot_app.updater.stop()
     await _bot_app.stop()
     await _bot_app.shutdown()
+    logger.info("Shutdown complete.")
 
 
 if __name__ == "__main__":

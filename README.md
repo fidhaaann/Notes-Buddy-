@@ -1,176 +1,103 @@
-# 🤖 Telegram Google Drive Control Bot
+# 🤖 Notes-Buddy: Telegram Google Drive Controller
 
-A Telegram bot that acts as a full control interface for your Google Drive — upload, download, search, rename, delete, and bulk-ZIP files, all from chat.
+**Notes-Buddy** is a high-performance Telegram bot that serves as a bridge between your chat interface and Google Drive. It allows for seamless file management, multi-user authentication, and advanced features like bulk-zipping directly from your mobile or desktop Telegram client.
 
 ---
 
-## ✨ Features
+## ✨ Features & Capabilities
 
-| Command | Description |
-|---|---|
-| `/start` | Welcome message & command list |
-| `/login` | Connect your Google account via OAuth |
-| `/logout` | Disconnect & delete stored tokens |
-| `/folders` | List folders in current location |
-| `/open <folder>` | Navigate into a folder |
-| `/list` | List files in current folder |
-| `/get <filename>` | Download a file from Drive |
-| `/search <keyword>` | Search all files by keyword |
-| `/rename <old> <new>` | Rename a file |
-| `/delete <filename>` | Permanently delete a file |
-| `/zip <keyword>` | Bundle matching files into a ZIP |
-| *(send any file)* | Upload directly to Google Drive |
+### 📂 File Management
+- **Full Navigation:** Browse your Drive folders with an intuitive inline-keyboard interface.
+- **Search:** Instant keyword-based search across your entire Drive.
+- **Metadata:** View detailed file information including size, MIME type, and creation date.
+- **Organization:** Create folders, rename files, and move content between directories.
+- **Favorites:** Mark important files for quick access via a dedicated favorites menu.
+- **Recent:** Quickly access files you've recently modified.
+
+### ⬆️ Upload & Download
+- **Direct Upload:** Send any file or document to the bot to upload it directly to your current Drive directory.
+- **Smart Downloads:** 
+  - Small files (< 45 MB) are sent directly to your chat.
+  - Large files (> 45 MB) provide direct Google Drive links to bypass Telegram's bot API limits.
+- **Bulk Zipping:** Search for files by keyword and bundle them into a single ZIP archive on-the-fly.
+
+### 🛡️ Security & Privacy
+- **Per-User OAuth:** Every user authenticates with their own Google account. The bot never sees your password.
+- **Secure Storage:** Access tokens are stored in a local SQLite database, encrypted at the OS level if configured.
+- **Session Control:** Use `/logout` at any time to wipe your session and revoke access tokens.
 
 ---
 
 ## 🛠️ Tech Stack
 
-- **Python 3.11+**
-- **python-telegram-bot v20** — async Telegram bot framework
-- **FastAPI + Uvicorn** — OAuth callback web server
-- **Google Drive API v3** — cloud storage
-- **Google OAuth 2.0** — per-user authentication
-- **SQLite** — token & file metadata storage (zero infrastructure needed)
-- **zipfile** — built-in Python ZIP support
+- **[Python 3.11+](https://www.python.org/)** — Core logic and async orchestration.
+- **[python-telegram-bot v20](https://python-telegram-bot.org/)** — Modern async framework for the Telegram interface.
+- **[FastAPI](https://fastapi.tiangolo.com/)** — Lightweight web server for handling OAuth2 callbacks.
+- **[Google Drive API v3](https://developers.google.com/drive/api/v3/about-sdk)** — Direct cloud interaction.
+- **[SQLite](https://sqlite.org/)** — Zero-config database for persisting user sessions and favorites.
 
 ---
 
-## 📁 Project Structure
+## 📁 Project Architecture
 
-```
-project/
+```text
+Notes-Buddy/
 ├── bot/
-│   ├── __init__.py
-│   ├── commands.py      # All /command handlers
-│   └── handlers.py      # Handler registration + file upload
+│   ├── commands.py      # /command handlers
+│   ├── callbacks.py     # Inline button interactions
+│   ├── ui.py            # Keyboard & UI layouts
+│   └── formatter.py     # Message string builders
 ├── drive/
-│   ├── __init__.py
-│   ├── auth.py          # OAuth flow (get URL, exchange code, refresh)
-│   └── drive_service.py # All Drive API calls
+│   ├── auth.py          # Google OAuth2 implementation
+│   └── drive_service.py # Drive API wrappers
 ├── services/
-│   ├── __init__.py
-│   ├── zip_service.py   # In-memory ZIP creation
-│   └── parser.py        # Argument parsing & formatting helpers
+│   ├── zip_service.py   # In-memory archive creation
+│   └── parser.py        # Input processing helpers
 ├── db/
-│   ├── __init__.py
-│   └── models.py        # SQLite schema & CRUD helpers
-├── main.py              # Entry point (bot + OAuth server)
-├── requirements.txt
-├── .env.example
-└── implementation.md
+│   └── models.py        # Database schema & CRUD
+├── main.py              # Application entry point
+└── credentials.json     # (Required) Google API credentials
 ```
 
 ---
 
-## ⚙️ Setup
+## 🔐 Security Considerations
 
-### 1. Clone & create virtual environment
-
-```bash
-git clone <repo-url>
-cd <repo-folder>
-python -m venv venv
-# Windows
-venv\Scripts\activate
-# macOS/Linux
-source venv/bin/activate
-```
-
-### 2. Install dependencies
-
-```bash
-pip install -r requirements.txt
-```
-
-### 3. Create your Telegram Bot
-
-1. Open Telegram → search **@BotFather**
-2. Send `/newbot` and follow the prompts
-3. Copy the **bot token**
-
-### 4. Set up Google Drive API
-
-1. Go to [Google Cloud Console](https://console.cloud.google.com/)
-2. Create a new project
-3. Enable **Google Drive API**
-4. Go to **Credentials → Create Credentials → OAuth 2.0 Client ID**
-5. Application type: **Web application**
-6. Add Authorized redirect URI: `http://localhost:8000/oauth/callback`
-7. Download `credentials.json` and place it in the project root
-
-### 5. Configure environment
-
-```bash
-cp .env.example .env
-# Edit .env and fill in your TELEGRAM_BOT_TOKEN
-```
-
-Or export directly:
-
-```bash
-# Windows PowerShell
-$env:TELEGRAM_BOT_TOKEN = "your-token-here"
-
-# macOS/Linux
-export TELEGRAM_BOT_TOKEN="your-token-here"
-```
-
-### 6. Run
-
-```bash
-python main.py
-```
-
-The bot starts polling Telegram, and the OAuth server listens on `http://localhost:8000`.
+1. **Token Persistence:** Tokens are stored in `bot_data.db`. While this allows for session persistence across bot restarts, ensure the environment where the bot is hosted is secure.
+2. **Redirect URIs:** The OAuth callback server runs on port `8000`. In production, this should be behind a reverse proxy (like Nginx) with HTTPS enabled to prevent token interception.
+3. **Environment Variables:** Sensitive data like `TELEGRAM_BOT_TOKEN` should be managed via `.env` files or system environment variables. Never commit these to version control.
+4. **App Permissions:** The bot requests `https://www.googleapis.com/auth/drive` scope. You can modify `drive/auth.py` to use `drive.file` for more restricted access (only files created by the bot).
 
 ---
 
-## 🔐 Authentication Flow
+## 🚀 Roadmap & Next Steps
 
-```
-User → /login
-Bot  → Sends Google OAuth consent URL
-User → Opens link, grants permission
-Google → Redirects to http://localhost:8000/oauth/callback
-Server → Stores token in SQLite
-Bot  → Confirms: "Authorization successful!"
-```
-
-Every subsequent command transparently loads and auto-refreshes the token.
+- [x] **Phase 1-4:** Core bot functionality, Drive integration, and file management.
+- [ ] **Phase 5: Enhanced UI/UX** — Implement breadcrumb navigation and improved loading states.
+- [ ] **Phase 6: Shared Drive Support** — Ability to browse and manage Google Shared Drives.
+- [ ] **Phase 7: AI Integration** — Natural language search (e.g., "Find the PDF about physics I uploaded last week").
+- [ ] **Phase 8: Multi-Account Support** — Allow users to switch between multiple Google accounts.
+- [ ] **Phase 9: Background Transfers** — Handle larger file uploads via chunked streaming to avoid timeouts.
 
 ---
 
-## 💾 Database Schema
+## 🎮 What You Can Do Right Now
 
-```sql
-users:  user_id | telegram_id | token | refresh_token
-files:  file_id | name        | type  | uploaded_at
-```
-
----
-
-## ⚠️ Limitations
-
-- Telegram file size limit: **50 MB** per file (bot API restriction)
-- Google Drive API free-tier quotas apply
-- ZIP downloads are built in-memory — avoid zipping very large file sets
+1. **Connect:** Run `/start` and click the login link to link your Google Drive.
+2. **Organize:** Use `/create_folder` to tidy up your root directory.
+3. **Migrate:** Send a file to the bot from your phone and see it appear instantly in your Drive.
+4. **Archive:** Try `/zip exam` to bundle all your "exam" related documents into one file for easy sharing.
+5. **Clean Up:** Use `/browse` to find old files and delete them directly from the interface.
 
 ---
 
-## 🔐 Security Notes
+## ⚙️ Quick Setup
 
-- Tokens are stored locally in SQLite — never commit `bot_data.db` or `credentials.json`
-- `.gitignore` already excludes both
-- Use `/logout` to wipe stored tokens at any time
-- Run behind HTTPS in production (use a reverse proxy like nginx)
+1. **Clone:** `git clone https://github.com/fidhaaann/Notes-Buddy-`
+2. **Install:** `pip install -r requirements.txt`
+3. **Credentials:** Place `credentials.json` from Google Cloud Console in the root.
+4. **Environment:** Create a `.env` file with `TELEGRAM_BOT_TOKEN`.
+5. **Run:** `python main.py`
 
 ---
-
-## 🚀 Development Phases
-
-- [x] Phase 1 — Bot + OAuth + Upload
-- [x] Phase 2 — List + Download
-- [x] Phase 3 — Rename + Delete + Search
-- [x] Phase 4 — ZIP + Bulk download
-- [ ] Phase 5 — UI Improvements (inline keyboards)
-- [ ] Phase 6 — AI-powered search (optional)
+*Developed with ❤️ for the Developer Community.*
