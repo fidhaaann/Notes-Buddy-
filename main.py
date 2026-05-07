@@ -230,6 +230,7 @@ async def main() -> None:
     _bot_app = build_bot()
     await _bot_app.initialize()
     await _bot_app.start()
+    assert _bot_app.updater is not None, "Bot updater failed to initialise"
     await _bot_app.updater.start_polling(drop_pending_updates=True)
 
     # Store the bot's username so the OAuth callback can build the redirect URL
@@ -244,6 +245,7 @@ async def main() -> None:
 
     # Graceful shutdown
     logger.info("Shutting down...")
+    assert _bot_app.updater is not None
     await _bot_app.updater.stop()
     await _bot_app.stop()
     await _bot_app.shutdown()
