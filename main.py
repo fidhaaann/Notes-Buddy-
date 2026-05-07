@@ -151,7 +151,8 @@ def build_bot() -> Application:
     if not BOT_TOKEN:
         raise RuntimeError(
             "TELEGRAM_BOT_TOKEN environment variable is not set.\n"
-            "Add it to your .env file and restart."
+            "  • Railway: Add it in the Variables tab of your service dashboard.\n"
+            "  • Local:   Add it to your .env file and restart."
         )
     app = Application.builder().token(BOT_TOKEN).build()
     register_handlers(app)
