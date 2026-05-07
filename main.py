@@ -89,10 +89,10 @@ async def oauth_callback(request: Request):
                 logger.warning("Could not send success message to user %s", telegram_id)
 
         # ── Redirect browser back to the Telegram bot ─────────────────────────
-        if _bot_username:
-            redirect_url = f"https://t.me/{escape(_bot_username)}"
-        else:
-            redirect_url = "https://t.me"
+        safe_username = escape(_bot_username) if _bot_username else ""
+        web_url = f"https://t.me/{safe_username}" if safe_username else "https://t.me"
+        # tg:// protocol opens Telegram app directly on mobile
+        app_url = f"tg://resolve?domain={safe_username}" if safe_username else ""
 
         # Show a brief page first, then redirect — works on all platforms
         return HTMLResponse(
@@ -100,7 +100,6 @@ async def oauth_callback(request: Request):
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta http-equiv="refresh" content="3;url={redirect_url}">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Authorization Successful</title>
   <style>
@@ -117,24 +116,62 @@ async def oauth_callback(request: Request):
     .icon {{ font-size: 64px; margin-bottom: 16px; }}
     h1 {{ margin: 0 0 8px; font-size: 24px; }}
     p  {{ color: #8b9aaa; margin: 0 0 24px; font-size: 15px; }}
-    a  {{
-      display: inline-block;
-      background: #2ea6ff; color: #fff; text-decoration: none;
-      padding: 12px 28px; border-radius: 10px; font-size: 15px;
-      font-weight: 600; transition: background .2s;
+    .btn {{
+      display: inline-block; color: #fff; text-decoration: none;
+      padding: 14px 32px; border-radius: 10px; font-size: 16px;
+      font-weight: 600; transition: background .2s; margin: 6px;
+      border: none; cursor: pointer;
     }}
-    a:hover {{ background: #1a8fe0; }}
+    .btn-primary {{ background: #2ea6ff; }}
+    .btn-primary:hover {{ background: #1a8fe0; }}
+    .btn-secondary {{ background: #3a4a5c; font-size: 13px; padding: 10px 20px; }}
+    .btn-secondary:hover {{ background: #4a5a6c; }}
     small {{ display:block; margin-top:16px; color:#566575; font-size:13px; }}
+    #countdown {{ font-variant-numeric: tabular-nums; }}
   </style>
 </head>
 <body>
   <div class="card">
     <div class="icon">✅</div>
     <h1>Authorization Successful!</h1>
-    <p>Your Google Drive has been connected.<br>Redirecting you back to Telegram…</p>
-    <a href="{redirect_url}">↩ Open Telegram</a>
-    <small>Redirecting automatically in 3 seconds…</small>
+    <p>Your Google Drive has been connected.<br>You can now return to Telegram.</p>
+    <div>
+      <a class="btn btn-primary" href="{web_url}" id="openBtn">↩ Open Telegram</a>
+    </div>
+    <small>Redirecting in <span id="countdown">3</span>s…</small>
   </div>
+  <script>
+    // Try tg:// protocol first (opens app directly on mobile)
+    var appUrl = "{app_url}";
+    var webUrl = "{web_url}";
+
+    // Countdown display
+    var secs = 3;
+    var counter = document.getElementById("countdown");
+    var timer = setInterval(function() {{
+      secs--;
+      if (counter) counter.textContent = secs;
+      if (secs <= 0) {{
+        clearInterval(timer);
+        // Try app protocol, fall back to web URL
+        if (appUrl) {{
+          window.location.href = appUrl;
+          setTimeout(function() {{ window.location.href = webUrl; }}, 500);
+        }} else {{
+          window.location.href = webUrl;
+        }}
+      }}
+    }}, 1000);
+
+    // Button click — try app protocol first
+    document.getElementById("openBtn").addEventListener("click", function(e) {{
+      if (appUrl) {{
+        e.preventDefault();
+        window.location.href = appUrl;
+        setTimeout(function() {{ window.location.href = webUrl; }}, 500);
+      }}
+    }});
+  </script>
 </body>
 </html>"""
         )
