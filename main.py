@@ -6,11 +6,18 @@ Telegram bot (polling) concurrently using asyncio.
 Production deployment (Railway):
   Railway injects PORT as an env var. The app binds to 0.0.0.0:$PORT.
   Set OAUTH_REDIRECT_URI to https://<app>.up.railway.app/oauth/callback.
+
+Security:
+  - Security headers middleware on all HTTP responses
+  - Sensitive data log filter
+  - Username validation on OAuth redirect
 """
 
 import asyncio
+import json
 import logging
 import os
+import re
 
 from dotenv import load_dotenv
 load_dotenv()   # ← loads .env before anything reads env vars
@@ -18,6 +25,7 @@ load_dotenv()   # ← loads .env before anything reads env vars
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from telegram.ext import Application
 
@@ -26,10 +34,32 @@ from bot.handlers import register_handlers
 from drive.auth import exchange_code
 
 # ── Logging ───────────────────────────────────────────────────────────────────
+
+
+class _SensitiveDataFilter(logging.Filter):
+    """Redact potential tokens, keys, and credentials from log output."""
+    _patterns = [
+        # OAuth tokens (long base64-like strings)
+        re.compile(r'ya29\.[A-Za-z0-9_-]{20,}'),
+        # Generic long secrets (40+ chars)
+        re.compile(r'(?<=["\s=:])[A-Za-z0-9_/+-]{40,}'),
+        # Fernet tokens
+        re.compile(r'gAAAAA[A-Za-z0-9_/+-]{20,}'),
+    ]
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.msg, str):
+            for pattern in self._patterns:
+                record.msg = pattern.sub('[REDACTED]', record.msg)
+        return True
+
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
 )
+# Apply sensitive data filter to root logger
+logging.getLogger().addFilter(_SensitiveDataFilter())
 logger = logging.getLogger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -47,6 +77,26 @@ _bot_username: str | None    = None
 _TEMPLATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates")
 _SUCCESS_PAGE = open(os.path.join(_TEMPLATE_DIR, "success.html"), encoding="utf-8").read()
 
+# ── Security Headers Middleware ───────────────────────────────────────────────
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Add security headers to all HTTP responses."""
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; "
+            "style-src 'self' 'unsafe-inline'; "
+            "script-src 'self' 'unsafe-inline'; "
+            "frame-ancestors 'none';"
+        )
+        return response
+
+
 # ── FastAPI app ───────────────────────────────────────────────────────────────
 web_app = FastAPI(
     title="Drive Bot OAuth Server",
@@ -54,13 +104,27 @@ web_app = FastAPI(
     redoc_url=None,
     openapi_url=None,
 )
+web_app.add_middleware(SecurityHeadersMiddleware)
+
+
+# ── Username validation ───────────────────────────────────────────────────────
+_USERNAME_PATTERN = re.compile(r'^[A-Za-z0-9_]{3,32}$')
+
+def _safe_username(username: str | None) -> str:
+    """Validate and return a safe bot username for redirect URLs."""
+    if not username:
+        return ""
+    if not _USERNAME_PATTERN.match(username):
+        logger.warning("Bot username failed validation: %s", username[:32])
+        return ""
+    return username
 
 
 @web_app.get("/oauth/callback")
 async def oauth_callback(request: Request):
     """
     Google redirects here after the user authorizes access.
-    After exchanging the code (with CSRF nonce verification):
+    After exchanging the code (with CSRF nonce + PKCE verification):
       1. Sends a Telegram message to the user (login success + main menu).
       2. Redirects the browser straight back to the Telegram bot.
     """
@@ -73,36 +137,50 @@ async def oauth_callback(request: Request):
     if not code or not state:
         return HTMLResponse("<h2>❌ Missing parameters.</h2>", status_code=400)
 
+    # Validate state format before processing
+    if len(state) > 200 or not re.match(r'^\d+:[A-Za-z0-9_-]+$', state):
+        return HTMLResponse("<h2>❌ Invalid request.</h2>", status_code=400)
+
     try:
-        # exchange_code now parses state, verifies CSRF nonce, and returns telegram_id
+        # exchange_code now parses state, verifies CSRF nonce + PKCE, and returns telegram_id
         telegram_id = exchange_code(code, state)
 
         # ── Notify the user inside Telegram ───────────────────────────────────
         if _bot_app is not None:
-            from bot.ui import main_menu_keyboard
+            from bot.formatter import login_successful
+            from bot.ui import post_login_keyboard
             try:
                 await _bot_app.bot.send_message(
                     chat_id=telegram_id,
-                    text=(
-                        "✅ Google Drive Connected!\n\n"
-                        "Your account has been authorized successfully.\n"
-                        "Use the menu below to start managing your files."
-                    ),
-                    reply_markup=main_menu_keyboard(),
+                    text=login_successful(),
+                    reply_markup=post_login_keyboard(),
                 )
             except Exception:
                 logger.warning("Could not send success message to user %s", telegram_id)
 
         # ── Redirect browser back to the Telegram bot ─────────────────────────
-        safe_username = escape(_bot_username) if _bot_username else ""
-        web_url = "https://t.me/" + safe_username if safe_username else "https://t.me"
-        # tg:// protocol opens Telegram app directly on mobile
-        app_url = "tg://resolve?domain=" + safe_username if safe_username else ""
+        safe_name = _safe_username(_bot_username)
+        safe_name_escaped = escape(safe_name) if safe_name else ""
+        web_url = f"https://t.me/{safe_name_escaped}" if safe_name_escaped else "https://t.me"
+        app_url = f"tg://resolve?domain={safe_name_escaped}" if safe_name_escaped else ""
 
         # Show a brief page first, then redirect — works on all platforms
-        page = _SUCCESS_PAGE.replace("{{WEB_URL}}", web_url).replace("{{APP_URL}}", app_url)
+        # V-NEW-07: Use JSON serialization for JS-safe URL injection
+        page = _SUCCESS_PAGE.replace(
+            "{{WEB_URL}}", json.dumps(web_url)[1:-1]  # strip outer quotes
+        ).replace(
+            "{{APP_URL}}", json.dumps(app_url)[1:-1]
+        )
         return HTMLResponse(page)
 
+    except ValueError as e:
+        # CSRF/PKCE verification failure — expected error, don't expose details
+        logger.warning("OAuth state verification failed: %s", str(e)[:100])
+        return HTMLResponse(
+            "<h2>❌ Authorization failed</h2>"
+            "<p>The login link may have expired. Please try again.</p>",
+            status_code=400,
+        )
     except Exception as e:
         logger.exception("OAuth callback error")
         return HTMLResponse(
@@ -167,6 +245,19 @@ async def main() -> None:
     # Store the bot's username so the OAuth callback can build the redirect URL
     _bot_username = _bot_app.bot.username
     logger.info("Telegram bot started (polling) as @%s.", _bot_username)
+
+    # V-NEW-03: Periodic cleanup of expired OAuth states
+    async def _periodic_cleanup():
+        """Clean expired OAuth states every 30 minutes."""
+        while True:
+            await asyncio.sleep(1800)  # 30 minutes
+            try:
+                cleanup_expired_states()
+                logger.debug("Periodic OAuth state cleanup completed.")
+            except Exception:
+                logger.warning("Periodic state cleanup failed.")
+
+    asyncio.create_task(_periodic_cleanup())
 
     # Start FastAPI (OAuth server)
     config = uvicorn.Config(web_app, host=HOST, port=PORT, log_level="info")

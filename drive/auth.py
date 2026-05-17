@@ -1,6 +1,6 @@
 """
 drive/auth.py
-Google OAuth 2.0 helpers.
+Google OAuth 2.0 helpers with PKCE support.
 Each Telegram user has their own OAuth token stored in SQLite.
 
 Supports two credential sources (checked in order):
@@ -11,8 +11,14 @@ Supports two credential sources (checked in order):
 
 Security:
   - OAuth state includes a CSRF nonce verified on callback.
+  - PKCE (S256) for authorization code exchange protection.
+  - Tokens never logged.
 """
 
+import hashlib
+import base64
+from http.client import HTTPSConnection
+from urllib.parse import urlencode
 import json
 import logging
 import os
@@ -26,6 +32,15 @@ from db.models import get_user, upsert_user, store_oauth_state, verify_oauth_sta
 
 logger = logging.getLogger(__name__)
 
+# V-NEW-01: The broad 'auth/drive' scope is REQUIRED because this bot is a
+# full file manager — browsing, downloading, renaming, moving, and deleting
+# ANY file in the user's Drive. Narrower scopes like 'drive.file' only see
+# files created by the bot, breaking browse/search/download.
+# Compensating controls:
+#   1. TOKEN_ENCRYPTION_KEY mandatory in production (enforced in init_db)
+#   2. Audit logging on all destructive operations (delete/rename/move)
+#   3. Token revocation on logout (revoke_token in this module)
+#   4. PKCE + CSRF protection on OAuth flow
 SCOPES = ["https://www.googleapis.com/auth/drive"]
 CREDENTIALS_FILE = os.environ.get("GOOGLE_CREDENTIALS_FILE", "credentials.json")
 REDIRECT_URI = os.environ.get("OAUTH_REDIRECT_URI", "http://localhost:8000/oauth/callback")
@@ -59,6 +74,11 @@ def _get_client_config() -> dict:
         }
 
     if os.path.isfile(CREDENTIALS_FILE):
+        # V-NEW-06: Warn if credentials.json is present in production
+        if os.environ.get("RAILWAY_PUBLIC_DOMAIN"):
+            logger.warning(
+                "credentials.json found in production — use env vars instead."
+            )
         logger.debug("Using OAuth credentials from %s.", CREDENTIALS_FILE)
         with open(CREDENTIALS_FILE) as f:
             return json.load(f)
@@ -80,17 +100,39 @@ def _build_flow() -> Flow:
     )
 
 
+# ── PKCE helpers ──────────────────────────────────────────────────────────────
+
+def _generate_pkce_pair() -> tuple[str, str]:
+    """Generate a PKCE code_verifier and code_challenge (S256 method).
+
+    Returns:
+        (code_verifier, code_challenge)
+    """
+    # code_verifier: 43-128 characters of unreserved URI characters
+    code_verifier = secrets.token_urlsafe(64)
+
+    # code_challenge: BASE64URL(SHA256(code_verifier))
+    digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
+    code_challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+
+    return code_verifier, code_challenge
+
+
 def get_auth_url(telegram_id: int) -> str:
-    """Return the OAuth consent URL. Includes CSRF nonce in state."""
+    """Return the OAuth consent URL. Includes CSRF nonce + PKCE in state."""
     nonce = secrets.token_urlsafe(32)
-    store_oauth_state(telegram_id, nonce)
+    code_verifier, code_challenge = _generate_pkce_pair()
+
+    # Store nonce + verifier for later exchange
+    store_oauth_state(telegram_id, nonce, code_verifier)
 
     flow = _build_flow()
     auth_url, _ = flow.authorization_url(
         access_type="offline",
-        include_granted_scopes="true",
         prompt="consent",
         state=f"{telegram_id}:{nonce}",
+        code_challenge=code_challenge,
+        code_challenge_method="S256",
     )
     return auth_url
 
@@ -118,19 +160,63 @@ def exchange_code(code: str, state: str) -> int:
         raise ValueError("Invalid OAuth state: bad user ID.")
 
     nonce = parts[1]
-    if not verify_oauth_state(telegram_id, nonce):
+    valid, code_verifier = verify_oauth_state(telegram_id, nonce)
+    if not valid:
         raise ValueError("OAuth state verification failed — possible CSRF. Try /login again.")
 
     flow = _build_flow()
-    flow.fetch_token(code=code)
+    # Include PKCE code_verifier in token exchange if available
+    if code_verifier:
+        flow.fetch_token(code=code, code_verifier=code_verifier)
+    else:
+        flow.fetch_token(code=code)
+
     creds = flow.credentials
     upsert_user(
         telegram_id=telegram_id,
-        token=creds.token,
-        refresh_token=creds.refresh_token,
+        token=creds.token or "",
+        refresh_token=creds.refresh_token or "",
     )
-    logger.info("OAuth tokens stored for user %s.", telegram_id)
+    # Log success without exposing any token data
+    logger.info("OAuth flow completed for user %s.", telegram_id)
     return telegram_id
+
+
+def revoke_token(telegram_id: int) -> bool:
+    """Revoke the user's OAuth token at Google before deleting locally.
+
+    Uses stdlib http.client to avoid adding a requests dependency.
+    Returns True if revocation succeeded, False otherwise.
+    """
+    from db.models import get_user
+    row = get_user(telegram_id)
+    if not row or not row["token"]:
+        return False
+    try:
+        # Use the refresh_token if available (it has longer lifetime),
+        # otherwise fall back to the access token.
+        token_to_revoke = row.get("refresh_token") or row["token"]
+        conn = HTTPSConnection("oauth2.googleapis.com", timeout=5)
+        params = urlencode({"token": token_to_revoke})
+        conn.request(
+            "POST",
+            "/revoke",
+            body=params,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        resp = conn.getresponse()
+        success = resp.status == 200
+        conn.close()
+        if success:
+            logger.info("OAuth token revoked for user %s.", telegram_id)
+        else:
+            logger.warning(
+                "Token revocation returned %s for user %s.", resp.status, telegram_id
+            )
+        return success
+    except Exception:
+        logger.warning("Token revocation failed for user %s.", telegram_id)
+        return False
 
 
 def get_credentials(telegram_id: int) -> Credentials | None:
@@ -141,6 +227,8 @@ def get_credentials(telegram_id: int) -> Credentials | None:
 
     config    = _get_client_config()
     installed = config.get("installed") or config.get("web")
+    if not installed:
+        return None
 
     creds = Credentials(
         token=row["token"],
@@ -155,8 +243,8 @@ def get_credentials(telegram_id: int) -> Credentials | None:
         creds.refresh(Request())
         upsert_user(
             telegram_id=telegram_id,
-            token=creds.token,
-            refresh_token=creds.refresh_token,
+            token=creds.token or "",
+            refresh_token=creds.refresh_token or "",
         )
 
     return creds

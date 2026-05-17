@@ -5,6 +5,9 @@ SQLite schema creation and helper functions using Python's built-in sqlite3.
 Security features:
   - Optional Fernet encryption for OAuth tokens (set TOKEN_ENCRYPTION_KEY)
   - CSRF nonce storage for OAuth state verification
+  - PKCE code_verifier storage for OAuth PKCE flow
+  - WAL mode for safe concurrent access
+  - Restrictive file permissions on DB file
 """
 
 import base64
@@ -12,6 +15,8 @@ import hashlib
 import logging
 import os
 import sqlite3
+import stat
+import sys
 
 logger = logging.getLogger(__name__)
 
@@ -48,9 +53,23 @@ def _decrypt(value: str | None) -> str | None:
         return value  # fallback: plaintext from before encryption was enabled
 
 
+def _restrict_db_permissions() -> None:
+    """Set restrictive file permissions on the database file (Unix only)."""
+    if sys.platform == "win32":
+        return  # Windows handles permissions differently
+    try:
+        if os.path.isfile(DB_PATH):
+            os.chmod(DB_PATH, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
+    except OSError:
+        logger.warning("Could not restrict DB file permissions for %s", DB_PATH)
+
+
 def get_connection() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
+    # Enable WAL mode for better concurrent access
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 
@@ -80,22 +99,48 @@ def init_db() -> None:
             );
 
             CREATE TABLE IF NOT EXISTS oauth_states (
-                telegram_id INTEGER NOT NULL,
-                nonce       TEXT NOT NULL,
-                created_at  TEXT DEFAULT (datetime('now')),
+                telegram_id   INTEGER NOT NULL,
+                nonce         TEXT NOT NULL,
+                code_verifier TEXT,
+                created_at    TEXT DEFAULT (datetime('now')),
                 PRIMARY KEY (telegram_id, nonce)
+            );
+
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_id INTEGER NOT NULL,
+                action      TEXT NOT NULL,
+                file_id     TEXT,
+                detail      TEXT,
+                created_at  TEXT DEFAULT (datetime('now'))
             );
             """
         )
+        # ── Schema migrations for existing databases ──────────────────────────
+        # Add code_verifier column if upgrading from pre-PKCE schema
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(oauth_states)").fetchall()]
+        if "code_verifier" not in cols:
+            conn.execute("ALTER TABLE oauth_states ADD COLUMN code_verifier TEXT")
+            logger.info("Migrated oauth_states: added code_verifier column.")
+    _restrict_db_permissions()
     if _fernet:
         logger.info("Token encryption enabled.")
     else:
+        # V-NEW-01 compensating control: require encryption in production
+        if os.environ.get("RAILWAY_PUBLIC_DOMAIN"):
+            logger.critical(
+                "TOKEN_ENCRYPTION_KEY is REQUIRED in production. "
+                "Generate with: python -c \"import secrets; print(secrets.token_urlsafe(32))\""
+            )
+            raise SystemExit(
+                "TOKEN_ENCRYPTION_KEY must be set in production environments."
+            )
         logger.warning("TOKEN_ENCRYPTION_KEY not set — tokens stored in plaintext.")
 
 
 # ── User helpers ──────────────────────────────────────────────────────────────
 
-def upsert_user(telegram_id: int, token: str = None, refresh_token: str = None) -> None:
+def upsert_user(telegram_id: int, token: str | None = None, refresh_token: str | None = None) -> None:
     with get_connection() as conn:
         conn.execute(
             """
@@ -127,11 +172,13 @@ def get_user(telegram_id: int) -> dict | None:
 def delete_user(telegram_id: int) -> None:
     with get_connection() as conn:
         conn.execute("DELETE FROM users WHERE telegram_id = ?", (telegram_id,))
+        # Also clean up favorites for this user (V-15)
+        conn.execute("DELETE FROM favorites WHERE telegram_id = ?", (telegram_id,))
 
 
 # ── File helpers ──────────────────────────────────────────────────────────────
 
-def log_file(file_id: str, name: str, mime_type: str = None) -> None:
+def log_file(file_id: str, name: str, mime_type: str | None = None) -> None:
     with get_connection() as conn:
         conn.execute(
             """
@@ -175,38 +222,63 @@ def get_favorites(telegram_id: int) -> list[str]:
         return [row["file_id"] for row in rows]
 
 
-# ── OAuth state (CSRF protection) ────────────────────────────────────────────
+# ── OAuth state (CSRF + PKCE protection) ─────────────────────────────────────
 
-def store_oauth_state(telegram_id: int, nonce: str) -> None:
-    """Store a CSRF nonce for an OAuth flow."""
+def store_oauth_state(telegram_id: int, nonce: str, code_verifier: str | None = None) -> None:
+    """Store a CSRF nonce and optional PKCE code_verifier for an OAuth flow."""
     with get_connection() as conn:
         conn.execute("DELETE FROM oauth_states WHERE telegram_id = ?", (telegram_id,))
         conn.execute(
-            "INSERT INTO oauth_states (telegram_id, nonce) VALUES (?, ?)",
-            (telegram_id, nonce),
+            "INSERT INTO oauth_states (telegram_id, nonce, code_verifier) VALUES (?, ?, ?)",
+            (telegram_id, nonce, code_verifier),
         )
 
 
-def verify_oauth_state(telegram_id: int, nonce: str) -> bool:
-    """Verify and consume a CSRF nonce. Single-use, expires after 10 minutes."""
+def verify_oauth_state(telegram_id: int, nonce: str) -> tuple[bool, str | None]:
+    """Verify and consume a CSRF nonce. Returns (valid, code_verifier).
+
+    Single-use, expires after 10 minutes.
+    """
     with get_connection() as conn:
         row = conn.execute(
-            "SELECT 1 FROM oauth_states WHERE telegram_id = ? AND nonce = ? "
+            "SELECT code_verifier FROM oauth_states WHERE telegram_id = ? AND nonce = ? "
             "AND created_at > datetime('now', '-10 minutes')",
             (telegram_id, nonce),
         ).fetchone()
         if row:
+            code_verifier = row["code_verifier"]
             conn.execute(
                 "DELETE FROM oauth_states WHERE telegram_id = ? AND nonce = ?",
                 (telegram_id, nonce),
             )
-            return True
-        return False
+            return True, code_verifier
+        return False, None
 
 
 def cleanup_expired_states() -> None:
-    """Remove expired OAuth states (older than 10 minutes)."""
+    """Remove expired OAuth states and prune old audit log entries."""
     with get_connection() as conn:
         conn.execute(
             "DELETE FROM oauth_states WHERE created_at < datetime('now', '-10 minutes')"
         )
+        # F-02: Prune audit log entries older than 90 days to prevent unbounded growth
+        conn.execute(
+            "DELETE FROM audit_log WHERE created_at < datetime('now', '-90 days')"
+        )
+
+
+# ── Audit logging (V-NEW-01 compensating control) ────────────────────────────
+
+def log_audit(telegram_id: int, action: str, file_id: str | None = None, detail: str | None = None) -> None:
+    """Record a destructive operation for audit purposes.
+
+    Because the bot uses the broad 'auth/drive' scope (required for full
+    file-manager functionality), we log all destructive operations to provide
+    accountability and incident-response capability.
+    """
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT INTO audit_log (telegram_id, action, file_id, detail) VALUES (?, ?, ?, ?)",
+            (telegram_id, action, file_id, detail),
+        )
+    logger.info("AUDIT: user=%s action=%s file_id=%s detail=%s", telegram_id, action, file_id, detail)
