@@ -536,6 +536,8 @@ async def _handle_download(uid: int, file_id: str, query, context, update) -> No
         except Exception:
             pass
 
+    except PermissionError:
+        await _reply(query, update, formatter.login_required(), ui.back_to_menu_keyboard())
     except Exception as e:
         logger.exception("Download failed for file_id in callback")
         await _reply(

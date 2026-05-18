@@ -16,9 +16,11 @@ from email.mime.multipart import MIMEMultipart
 logger = logging.getLogger(__name__)
 
 # Configuration from environment
-SENDER_EMAIL = os.environ.get("ALERT_EMAIL_SENDER", "")
-SENDER_PASSWORD = os.environ.get("ALERT_EMAIL_PASSWORD", "")
-ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "")
+SENDER_EMAIL = os.environ.get("ALERT_EMAIL_SENDER", "").strip()
+# Gmail app passwords are often displayed with spaces; strip whitespace to avoid auth failures.
+_RAW_SENDER_PASSWORD = os.environ.get("ALERT_EMAIL_PASSWORD", "")
+SENDER_PASSWORD = _RAW_SENDER_PASSWORD.replace(" ", "").strip()
+ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "").strip()
 SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 587
 
@@ -36,7 +38,11 @@ def send_email(to_address: str, subject: str, body: str, is_html: bool = False) 
         True if successful, False otherwise
     """
     if not SENDER_EMAIL or not SENDER_PASSWORD:
-        logger.warning("Email service not configured. Skipping email to %s", to_address)
+        logger.warning(
+            "Email service not configured (ALERT_EMAIL_SENDER/ALERT_EMAIL_PASSWORD). "
+            "Skipping email to %s",
+            to_address,
+        )
         return False
     
     try:

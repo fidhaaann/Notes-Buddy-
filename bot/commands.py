@@ -475,6 +475,8 @@ async def cmd_download(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         except Exception:
             pass
 
+    except PermissionError:
+        await _msg(update).reply_text(formatter.login_required())
     except Exception as e:
         logger.exception("Download failed for index %s", index)
         await _msg(update).reply_text(

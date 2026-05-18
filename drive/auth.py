@@ -27,6 +27,7 @@ import secrets
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from google.auth.transport.requests import Request
+from google.auth.exceptions import RefreshError
 
 from db.models import get_user, upsert_user, store_oauth_state, verify_oauth_state
 
@@ -240,7 +241,11 @@ def get_credentials(telegram_id: int) -> Credentials | None:
     )
 
     if creds.expired and creds.refresh_token:
-        creds.refresh(Request())
+        try:
+            creds.refresh(Request())
+        except RefreshError as e:
+            logger.warning("Token refresh failed for user %s: %s", telegram_id, str(e)[:200])
+            return None
         upsert_user(
             telegram_id=telegram_id,
             token=creds.token or "",

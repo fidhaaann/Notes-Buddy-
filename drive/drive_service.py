@@ -15,6 +15,7 @@ import re
 from typing import Any, Optional
 
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
 from google.oauth2.credentials import Credentials
 
@@ -85,6 +86,14 @@ def _service(telegram_id: int) -> Any:
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
 
+def _raise_permission_for_http_error(err: HttpError) -> None:
+    """Translate auth-related HTTP errors into PermissionError."""
+    status = getattr(err, "resp", None)
+    if status and status.status in (401, 403):
+        raise PermissionError("User not authenticated. Use /login first.") from err
+    raise err
+
+
 # ── Folders ───────────────────────────────────────────────────────────────────
 
 def list_folders(telegram_id: int, parent_id: str = "root") -> list[dict]:
@@ -94,11 +103,14 @@ def list_folders(telegram_id: int, parent_id: str = "root") -> list[dict]:
         f"and mimeType='{FOLDER_MIME}' "
         f"and trashed=false"
     )
-    result = svc.files().list(
-        q=q,
-        fields="files(id, name, mimeType)",   # mimeType required for browse_keyboard routing
-        pageSize=50,
-    ).execute()
+    try:
+        result = svc.files().list(
+            q=q,
+            fields="files(id, name, mimeType)",   # mimeType required for browse_keyboard routing
+            pageSize=50,
+        ).execute()
+    except HttpError as e:
+        _raise_permission_for_http_error(e)
     return result.get("files", [])
 
 
@@ -123,11 +135,14 @@ def list_files(telegram_id: int, parent_id: str = "root") -> list[dict]:
         f"and mimeType!='{FOLDER_MIME}' "
         f"and trashed=false"
     )
-    result = svc.files().list(
-        q=q,
-        fields="files(id, name, mimeType, size)",
-        pageSize=50,
-    ).execute()
+    try:
+        result = svc.files().list(
+            q=q,
+            fields="files(id, name, mimeType, size)",
+            pageSize=50,
+        ).execute()
+    except HttpError as e:
+        _raise_permission_for_http_error(e)
     return result.get("files", [])
 
 def search_files(telegram_id: int, keyword: str) -> list[dict]:
