@@ -263,12 +263,15 @@ async def cmd_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             folders = ds.list_folders(uid, parent_id=fid)
             files = ds.list_files(uid, parent_id=fid)
         except HttpError as e:
-            if getattr(e, "resp", None) and e.resp.status == 404:
+            status = getattr(e, "resp", None)
+            if status and status.status in (400, 404, 410):
                 nav.go_home(uid)
                 fid = nav.current_folder_id(uid)
                 path = nav.breadcrumb(uid)
                 folders = ds.list_folders(uid, parent_id=fid)
                 files = ds.list_files(uid, parent_id=fid)
+            elif status and status.status in (401, 403):
+                raise PermissionError("User not authenticated.") from e
             else:
                 raise
 
