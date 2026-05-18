@@ -14,7 +14,7 @@ A professional, terminal-inspired Telegram bot for managing Google Drive files. 
 ### File Operations
 - **Index-Based Actions** — Download, view metadata, and enter folders using their displayed index
 - **Smart Downloads** — Files ≤ 45 MB sent directly; larger files provide Google Drive links
-- **Upload Flow** — Structured upload with destination confirmation
+- **Upload Flow** — Upload documents, images, and videos directly to the current folder
 - **Bulk ZIP** — Archive matching files into a single download
 
 ### Security & Privacy
@@ -40,7 +40,7 @@ A professional, terminal-inspired Telegram bot for managing Google Drive files. 
 | `/download <n>` | Download file by index |
 | `/more <n>` | View detailed file metadata |
 | `/search <q>` | Search all files by keyword |
-| `/upload` | Enter upload mode |
+| `/upload` | Enter upload mode (documents/images/videos) |
 | `/zip <q>` | Download matching files as ZIP |
 | `/rename <old> <new>` | Rename a file |
 | `/delete <name>` | Delete a file |
@@ -50,6 +50,7 @@ A professional, terminal-inspired Telegram bot for managing Google Drive files. 
 | `/clear` | Clear recent chat messages |
 | `/menu` | Show main menu |
 | `/help` | Show command reference |
+| `/tool` | Show keywords & abilities |
 
 ---
 
