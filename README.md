@@ -23,6 +23,8 @@ A professional, terminal-inspired Telegram bot for managing Google Drive files. 
 - **Encrypted Storage** — Fernet encryption for stored tokens (mandatory in production)
 - **Token Revocation** — Tokens invalidated at Google on logout
 - **Audit Logging** — All destructive operations (delete, rename, move) logged with timestamps
+- **Step-up Verification** — Email OTP required for delete/download/upload actions
+- **Threat Alerts** — Email alerts for suspicious activity
 - **Input Sanitization** — Filename, query, and index validation on all user inputs
 - **Rate Limiting** — Per-user cooldowns on expensive operations
 
@@ -42,11 +44,13 @@ A professional, terminal-inspired Telegram bot for managing Google Drive files. 
 | `/search <q>` | Search all files by keyword |
 | `/upload` | Enter upload mode (documents/images/videos) |
 | `/zip <q>` | Download matching files as ZIP |
-| `/rename <old> <new>` | Rename a file |
-| `/delete <name>` | Delete a file |
-| `/move <file> <folder>` | Move a file |
+| `/rename <n> <new>` | Rename by index |
+| `/delete <n>` | Delete a file by index |
+| `/move <f> <d>` | Move file to folder by index |
 | `/mkdir <name>` | Create a new folder |
 | `/logout` | Disconnect Google Drive (revokes token) |
+| `/email <addr>` | Set email for security alerts |
+| `/verify <otp>` | Verify a sensitive action |
 | `/clear` | Clear recent chat messages |
 | `/menu` | Show main menu |
 | `/help` | Show command reference |
