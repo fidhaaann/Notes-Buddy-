@@ -110,6 +110,7 @@ Notes-Buddy/
 
 > **Production Requirement:** Set `TOKEN_ENCRYPTION_KEY` — the bot will refuse to start on Railway without it.
 > Generate with: `python -c "import secrets; print(secrets.token_urlsafe(32))"`
+> Step-up email OTP can be enabled with `STEPUP_VERIFICATION_ENABLED=true` (disabled by default).
 
 ---
 

@@ -22,6 +22,13 @@ RESEND_COOLDOWN_SECONDS = 60
 MAX_ATTEMPTS = 5
 
 _SECRET = os.environ.get("TOKEN_ENCRYPTION_KEY", "")
+_STEPUP_ENABLED = os.environ.get("STEPUP_VERIFICATION_ENABLED", "").strip().lower() in (
+    "1", "true", "yes", "on"
+)
+
+
+def stepup_enabled() -> bool:
+    return _STEPUP_ENABLED
 
 
 def _hash_code(code: str) -> str:
@@ -58,6 +65,8 @@ async def request_verification(telegram_id: int, action_label: str) -> dict:
     Ensure a verification code is sent if needed.
     Returns a status dict for UI messaging.
     """
+    if not stepup_enabled():
+        return {"status": "verified"}
     now = datetime.now()
     if models.is_stepup_verified(telegram_id, now.isoformat()):
         return {"status": "verified"}
