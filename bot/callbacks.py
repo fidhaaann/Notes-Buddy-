@@ -29,6 +29,7 @@ from bot import formatter, ui, nav
 from db import models
 from services.parser import human_size
 from services import anomaly_detection
+from services import stepup_auth
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +84,50 @@ async def _edit(query, text: str, markup=None) -> None:
         await query.edit_message_text(**kwargs)
     except Exception:
         pass  # Message may have been deleted or unchanged
+
+
+async def _require_stepup(uid: int, action_label: str, query, update, context) -> bool:
+    """Ensure step-up verification before sensitive actions."""
+    assert context.user_data is not None
+    result = await stepup_auth.request_verification(uid, action_label)
+    status = result.get("status")
+    if status == "verified":
+        context.user_data.pop("awaiting_email", None)
+        context.user_data.pop("awaiting_otp", None)
+        context.user_data.pop("pending_stepup_action", None)
+        return True
+    if status == "no_email":
+        context.user_data["awaiting_email"] = True
+        context.user_data["pending_stepup_action"] = action_label
+        await _reply(
+            query, update,
+            formatter.stepup_email_required(action_label),
+            ui.stepup_email_entry_keyboard(),
+        )
+        return False
+    if status == "email_failed":
+        await _reply(query, update, formatter.stepup_email_failed())
+        return False
+    if status == "sent":
+        context.user_data["awaiting_otp"] = True
+        context.user_data["pending_stepup_action"] = action_label
+        await _reply(
+            query, update,
+            formatter.stepup_code_sent(action_label, result.get("email", ""), result.get("ttl", 10)),
+            ui.stepup_resend_keyboard(action_label),
+        )
+        return False
+    if status == "cooldown":
+        context.user_data["awaiting_otp"] = True
+        context.user_data["pending_stepup_action"] = action_label
+        await _reply(
+            query, update,
+            formatter.stepup_code_pending(action_label, result.get("email", ""), result.get("retry_after", 60)),
+            ui.stepup_resend_keyboard(action_label),
+        )
+        return False
+    await _reply(query, update, formatter.error("Verification required.", "Use /verify <code>"))
+    return False
 
 
 async def _send_browse(uid: int, query, update) -> None:
@@ -244,6 +289,20 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         return
 
+    # ── Step-up verification ──────────────────────────────────────────────────
+
+    if ns == "stepup":
+        action = parts[1] if len(parts) > 1 else ""
+        action_label = parts[2] if len(parts) > 2 else ""
+        allowed_actions = {"delete files", "download files", "upload files"}
+        if action == "resend" and action_label in allowed_actions:
+            if not _is_authenticated(uid):
+                await _reply(query, update, formatter.login_required())
+                return
+            if await _require_stepup(uid, action_label, query, update, context):
+                await _reply(query, update, formatter.stepup_already_verified(5))
+            return
+
     # ── File ──────────────────────────────────────────────────────────────────
 
     if ns == "file":
@@ -302,9 +361,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         elif action == "delete":
             try:
                 meta = ds.get_file_metadata(uid, file_id)
+                meta["_path"] = nav.breadcrumb(uid)
                 await _reply(
                     query, update,
-                    formatter.confirm_action("Delete", meta.get("name", "this file")),
+                    formatter.confirm_delete_preview(meta),
                     ui.confirm_keyboard("delete", file_id),
                 )
             except Exception as e:
@@ -333,6 +393,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         if action == "delete":
             try:
+                if not await _require_stepup(uid, "delete files", query, update, context):
+                    return
+
                 # Check for anomaly before deleting
                 if await anomaly_detection.check_anomaly(uid, "delete"):
                     await _reply(query, update, formatter.error(
@@ -373,11 +436,19 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 return
 
             try:
+                if not await _require_stepup(uid, "upload files", query, update, context):
+                    return
+
                 from drive.drive_service import upload_file
                 fid = nav.current_folder_id(uid)
+                if "file_bytes" in pending:
+                    file_bytes = pending["file_bytes"]
+                else:
+                    tg_file = await context.bot.get_file(pending["file_id"])
+                    file_bytes = await tg_file.download_as_bytearray()
                 uploaded = upload_file(
                     uid,
-                    pending["file_bytes"],
+                    file_bytes,
                     pending["file_name"],
                     parent_id=fid,
                 )
@@ -415,6 +486,19 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def _handle_download(uid: int, file_id: str, query, context, update) -> None:
     """Download a file from Drive and send it to Telegram."""
     try:
+        if not await _require_stepup(uid, "download files", query, update, context):
+            return
+
+        # Check for anomaly before downloading
+        if await anomaly_detection.check_anomaly(uid, "download"):
+            await _reply(query, update, formatter.error(
+                "⛔ Unusual Activity Detected",
+                "Your Google Drive access has been suspended for security.\n\n"
+                "Check your email and Telegram for alerts.\n"
+                "Use /login to reconnect when ready."
+            ))
+            return
+
         meta = ds.get_file_metadata(uid, file_id)
         fname = meta.get("name", "file")
         size_raw = int(meta["size"]) if meta.get("size") else 0
