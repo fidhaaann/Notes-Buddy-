@@ -5,7 +5,7 @@ google-api-python-client==2.196.0
 google-auth==2.53.0
 google-auth-oauthlib==1.4.0
 google-auth-httplib2==0.2.0
-python-multipart==0.0.28
+python-multipart==0.0.29
 python-dotenv==1.2.2
 cryptography==48.0.0
 urllib3>=2.7.0
