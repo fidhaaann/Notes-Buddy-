@@ -4,7 +4,7 @@ All /command handlers.
 
 Implements the terminal-style navigation system with hierarchical indexing.
 Commands: /start, /info, /cd, /pwd, /download, /more, /upload, /search,
-          /zip, /rename, /delete, /move, /mkdir, /logout, /email, /clear, /menu, /help, /tool
+          /zip, /rename, /delete, /move, /mkdir, /logout, /email, /verify, /clear, /menu, /help, /tool
 
 Security:
   - Input validation on all index parameters
@@ -32,6 +32,7 @@ from bot import nav
 from services import parser as p
 from services.zip_service import create_zip
 from services import anomaly_detection
+from services import stepup_auth
 from db import models
 
 logger = logging.getLogger(__name__)
@@ -141,6 +142,48 @@ def _check_rate_limit(uid: int, operation: str) -> bool:
     if now - last < _RATE_COOLDOWN:
         return True  # rate limited
     _RATE_LIMITS[operation][uid] = now
+    return False
+
+
+async def _require_stepup(update: Update, context: ContextTypes.DEFAULT_TYPE, action_label: str) -> bool:
+    """Ensure the user is verified for sensitive actions."""
+    uid = _uid(update)
+    assert context.user_data is not None
+    result = await stepup_auth.request_verification(uid, action_label)
+    status = result.get("status")
+    if status == "verified":
+        context.user_data.pop("awaiting_email", None)
+        context.user_data.pop("awaiting_otp", None)
+        context.user_data.pop("pending_stepup_action", None)
+        return True
+    if status == "no_email":
+        context.user_data["awaiting_email"] = True
+        context.user_data["pending_stepup_action"] = action_label
+        await _msg(update).reply_text(
+            formatter.stepup_email_required(action_label),
+            reply_markup=ui.stepup_email_entry_keyboard(),
+        )
+        return False
+    if status == "email_failed":
+        await _msg(update).reply_text(formatter.stepup_email_failed())
+        return False
+    if status == "sent":
+        context.user_data["awaiting_otp"] = True
+        context.user_data["pending_stepup_action"] = action_label
+        await _msg(update).reply_text(
+            formatter.stepup_code_sent(action_label, result.get("email", ""), result.get("ttl", 10)),
+            reply_markup=ui.stepup_resend_keyboard(action_label),
+        )
+        return False
+    if status == "cooldown":
+        context.user_data["awaiting_otp"] = True
+        context.user_data["pending_stepup_action"] = action_label
+        await _msg(update).reply_text(
+            formatter.stepup_code_pending(action_label, result.get("email", ""), result.get("retry_after", 60)),
+            reply_markup=ui.stepup_resend_keyboard(action_label),
+        )
+        return False
+    await _msg(update).reply_text(formatter.error("Verification required.", "Use /verify <code>"))
     return False
 
 
@@ -375,6 +418,20 @@ async def cmd_download(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     try:
+        if not await _require_stepup(update, context, "download files"):
+            return
+
+        if await anomaly_detection.check_anomaly(uid, "download"):
+            await _msg(update).reply_text(
+                formatter.error(
+                    "⛔ Unusual Activity Detected",
+                    "Your Google Drive access has been suspended for security.\n\n"
+                    "Check your email and Telegram for alerts.\n"
+                    "Use /login to reconnect when ready.",
+                )
+            )
+            return
+
         # Get metadata for size check
         meta = ds.get_file_metadata(uid, item.id)
         fname = meta.get("name", item.name)
@@ -569,18 +626,29 @@ async def cmd_rename(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     args = p.parse_args(_text(update), "/rename")
     if len(args) < 2:
         await _msg(update).reply_text(
-            formatter.error("Missing arguments.", "Usage: /rename <old_name> <new_name>")
+            formatter.error("Missing arguments.", "Usage: /rename <index> <new_name>")
         )
         return
-    old_name, new_name = args[0], " ".join(args[1:])
+    index, new_name = args[0].strip(), " ".join(args[1:])
+    if not _validate_index(index):
+        await _msg(update).reply_text(
+            formatter.error(
+                "Invalid index format.",
+                "Use indices like 1, 1.2, or 1.2.3 from the /info listing.",
+            )
+        )
+        return
     try:
-        fm = ds.find_file_by_name(uid, old_name)
-        if not fm:
+        item = nav.resolve_index(uid, index)
+        if not item:
             await _msg(update).reply_text(
-                formatter.error(f"File not found.", "Use /search to locate it.")
+                formatter.error(
+                    f"Index [{index}] not found.",
+                    "Use /info to see the current directory listing.",
+                )
             )
             return
-        updated = ds.rename_file(uid, fm["id"], new_name)
+        updated = ds.rename_file(uid, item.id, new_name)
         await _msg(update).reply_text(
             formatter.success("Renamed", updated['name']),
             reply_markup=ui.back_to_menu_keyboard(),
@@ -590,7 +658,7 @@ async def cmd_rename(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     except Exception as e:
         logger.exception("cmd_rename error")
         await _msg(update).reply_text(
-            formatter.error("Rename failed.", "Check the filename and try again.")
+            formatter.error("Rename failed.", "Check the name and try again.")
         )
 
 
@@ -599,26 +667,48 @@ async def cmd_move(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     args = p.parse_args(_text(update), "/move")
     if len(args) < 2:
         await _msg(update).reply_text(
-            formatter.error("Missing arguments.", "Usage: /move <file_name> <folder_name>")
+            formatter.error("Missing arguments.", "Usage: /move <file_index> <folder_index>")
         )
         return
-    file_name, folder_name = args[0], " ".join(args[1:])
-    try:
-        fm = ds.find_file_by_name(uid, file_name)
-        if not fm:
-            await _msg(update).reply_text(
-                formatter.error("File not found.", "Use /search to locate it.")
-            )
-            return
-        tf = ds.open_folder(uid, folder_name)
-        if not tf:
-            await _msg(update).reply_text(
-                formatter.error("Destination folder not found.")
-            )
-            return
-        ds.move_file(uid, fm["id"], tf["id"])
+    file_index, folder_index = args[0].strip(), args[1].strip()
+    if not _validate_index(file_index) or not _validate_index(folder_index):
         await _msg(update).reply_text(
-            formatter.success("Moved", file_name, folder_name),
+            formatter.error(
+                "Invalid index format.",
+                "Use indices like 1, 1.2, or 1.2.3 from the /info listing.",
+            )
+        )
+        return
+    try:
+        file_item = nav.resolve_index(uid, file_index)
+        if not file_item:
+            await _msg(update).reply_text(
+                formatter.error(
+                    f"Index [{file_index}] not found.",
+                    "Use /info to see the current directory listing.",
+                )
+            )
+            return
+        dest_item = nav.resolve_index(uid, folder_index)
+        if not dest_item:
+            await _msg(update).reply_text(
+                formatter.error(
+                    f"Index [{folder_index}] not found.",
+                    "Use /info to see the current directory listing.",
+                )
+            )
+            return
+        if not dest_item.is_folder:
+            await _msg(update).reply_text(
+                formatter.error(
+                    f"[{folder_index}] is not a folder.",
+                    "Choose a folder index from /info.",
+                )
+            )
+            return
+        ds.move_file(uid, file_item.id, dest_item.id)
+        await _msg(update).reply_text(
+            formatter.success("Moved", file_item.name, dest_item.name),
             reply_markup=ui.back_to_menu_keyboard(),
         )
     except PermissionError:
@@ -626,7 +716,7 @@ async def cmd_move(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception as e:
         logger.exception("cmd_move error")
         await _msg(update).reply_text(
-            formatter.error("Move failed.", "Check the names and try again.")
+            formatter.error("Move failed.", "Check the indices and try again.")
         )
 
 
@@ -635,20 +725,41 @@ async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     args = p.parse_args(_text(update), "/delete")
     if not args:
         await _msg(update).reply_text(
-            formatter.error("Missing filename.", "Usage: /delete <filename>")
+            formatter.error("Missing index.", "Usage: /delete <index>  (e.g. /delete 3)")
         )
         return
-    filename = " ".join(args)
+    target = args[0].strip()
     try:
-        fm = ds.find_file_by_name(uid, filename)
-        if not fm:
+        if _validate_index(target):
+            item = nav.resolve_index(uid, target)
+            if not item:
+                await _msg(update).reply_text(
+                    formatter.error(
+                        f"Index [{target}] not found.",
+                        "Use /info to see the current directory listing.",
+                    )
+                )
+                return
+            if item.is_folder:
+                await _msg(update).reply_text(
+                    formatter.error(
+                        f"[{target}] is a folder.",
+                        "Use /cd to enter it, or delete files inside it.",
+                    )
+                )
+                return
+            meta = ds.get_file_metadata(uid, item.id)
+            meta["_path"] = item.path
             await _msg(update).reply_text(
-                formatter.error("File not found.", "Use /search to locate it.")
+                formatter.confirm_delete_preview(meta, target),
+                reply_markup=ui.confirm_keyboard("delete", item.id),
             )
             return
         await _msg(update).reply_text(
-            formatter.confirm_action("Delete", filename),
-            reply_markup=ui.confirm_keyboard("delete", fm["id"]),
+            formatter.error(
+                "Invalid index format.",
+                "Use /info and delete by index like /delete 3.",
+            )
         )
     except PermissionError:
         await _msg(update).reply_text(formatter.login_required())
@@ -850,10 +961,14 @@ async def cmd_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "Usage: /email <your-email@example.com>"
             )
         else:
+            assert context.user_data is not None
+            context.user_data["awaiting_email"] = True
             await _msg(update).reply_text(
                 "📧 Security Alerts\n\n"
                 "Set your email to receive alerts if unusual activity is detected.\n\n"
-                "Usage: /email your-email@example.com"
+                "Reply with your email now (e.g. you@example.com)\n"
+                "or use /email your-email@example.com",
+                reply_markup=ui.stepup_email_entry_keyboard(),
             )
         return
     
@@ -871,12 +986,47 @@ async def cmd_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     
     # Store email
     if models.set_user_email(uid, email):
+        assert context.user_data is not None
+        context.user_data.pop("awaiting_email", None)
         await _msg(update).reply_text(
             f"✅ Email updated\n\n"
             f"Address: {email}\n\n"
             "You will receive security alerts at this email if suspicious activity is detected."
         )
         logger.info("Email set for user %s: %s", uid, email)
+
+        pending_action = context.user_data.get("pending_stepup_action")
+        if pending_action:
+            result = await stepup_auth.request_verification(uid, pending_action)
+            status = result.get("status")
+            if status == "verified":
+                context.user_data.pop("pending_stepup_action", None)
+                await _msg(update).reply_text(
+                    formatter.stepup_verified(result.get("window", 5)),
+                    reply_markup=ui.post_login_keyboard(),
+                )
+            elif status == "sent":
+                context.user_data["awaiting_otp"] = True
+                await _msg(update).reply_text(
+                    formatter.stepup_code_sent(
+                        pending_action,
+                        result.get("email", ""),
+                        result.get("ttl", 10),
+                    ),
+                    reply_markup=ui.stepup_resend_keyboard(pending_action),
+                )
+            elif status == "cooldown":
+                context.user_data["awaiting_otp"] = True
+                await _msg(update).reply_text(
+                    formatter.stepup_code_pending(
+                        pending_action,
+                        result.get("email", ""),
+                        result.get("retry_after", 60),
+                    ),
+                    reply_markup=ui.stepup_resend_keyboard(pending_action),
+                )
+            elif status == "email_failed":
+                await _msg(update).reply_text(formatter.stepup_email_failed())
     else:
         await _msg(update).reply_text(
             formatter.error(
@@ -884,3 +1034,70 @@ async def cmd_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "Please try again later."
             )
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# /verify  — Confirm a sensitive action with OTP
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def cmd_verify(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = _uid(update)
+    args = p.parse_args(_text(update), "/verify")
+
+    if not _is_authenticated(uid):
+        await _msg(update).reply_text(formatter.login_required())
+        return
+
+    if not args:
+        await _msg(update).reply_text(
+            formatter.error("Missing code.", "Usage: /verify <6-digit code>")
+        )
+        return
+
+    code = args[0].strip()
+    if not (code.isdigit() and len(code) == 6):
+        await _msg(update).reply_text(
+            formatter.error("Invalid code format.", "Use the 6-digit code from your email.")
+        )
+        return
+
+    result = stepup_auth.verify_code(uid, code)
+    status = result.get("status")
+
+    if status == "verified":
+        assert context.user_data is not None
+        context.user_data.pop("awaiting_otp", None)
+        context.user_data.pop("pending_stepup_action", None)
+        await _msg(update).reply_text(
+            formatter.stepup_verified(result.get("window", 5)),
+            reply_markup=ui.post_login_keyboard(),
+        )
+        return
+    if status == "already_verified":
+        assert context.user_data is not None
+        context.user_data.pop("awaiting_otp", None)
+        await _msg(update).reply_text(
+            formatter.stepup_already_verified(result.get("remaining", 1))
+        )
+        return
+    if status == "invalid":
+        await _msg(update).reply_text(
+            formatter.stepup_invalid_code(result.get("remaining", 0))
+        )
+        return
+    if status == "expired":
+        assert context.user_data is not None
+        context.user_data.pop("awaiting_otp", None)
+        context.user_data.pop("pending_stepup_action", None)
+        await _msg(update).reply_text(formatter.stepup_code_expired())
+        return
+    if status == "locked":
+        assert context.user_data is not None
+        context.user_data.pop("awaiting_otp", None)
+        context.user_data.pop("pending_stepup_action", None)
+        await _msg(update).reply_text(formatter.stepup_locked())
+        return
+
+    await _msg(update).reply_text(
+        formatter.error("No active verification.", "Retry the action to get a new code.")
+    )
