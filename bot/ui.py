@@ -115,3 +115,20 @@ def back_to_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[
         InlineKeyboardButton("📋 Main Menu", callback_data="nav:menu"),
     ]])
+
+
+# ── Step-up verification keyboards ────────────────────────────────────────────
+
+def stepup_resend_keyboard(action: str) -> InlineKeyboardMarkup:
+    """Shown when waiting for OTP — allows resending."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 Resend Code", callback_data=f"stepup:resend:{action}"),
+         InlineKeyboardButton("❌ Cancel", callback_data="nav:menu")],
+    ])
+
+
+def stepup_email_entry_keyboard() -> InlineKeyboardMarkup:
+    """Shown when waiting for email input."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("❌ Cancel", callback_data="nav:menu")],
+    ])

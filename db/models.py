@@ -140,6 +140,15 @@ def init_db() -> None:
                 window_start TEXT DEFAULT (datetime('now')),
                 updated_at  TEXT DEFAULT (datetime('now'))
             );
+
+            CREATE TABLE IF NOT EXISTS stepup_auth (
+                telegram_id   INTEGER PRIMARY KEY,
+                code_hash     TEXT,
+                expires_at    TEXT,
+                verified_until TEXT,
+                last_sent_at  TEXT,
+                attempts      INTEGER DEFAULT 0
+            );
             """
         )
         # ── Schema migrations for existing databases ──────────────────────────
@@ -193,6 +202,21 @@ def init_db() -> None:
                 """
             )
             logger.info("Created anomaly_tracking table.")
+
+        if "stepup_auth" not in tables:
+            conn.execute(
+                """
+                CREATE TABLE stepup_auth (
+                    telegram_id   INTEGER PRIMARY KEY,
+                    code_hash     TEXT,
+                    expires_at    TEXT,
+                    verified_until TEXT,
+                    last_sent_at  TEXT,
+                    attempts      INTEGER DEFAULT 0
+                )
+                """
+            )
+            logger.info("Created stepup_auth table.")
     _restrict_db_permissions()
     if _fernet:
         logger.info("Token encryption enabled.")
@@ -349,6 +373,11 @@ def cleanup_expired_states() -> None:
         conn.execute(
             "DELETE FROM audit_log WHERE created_at < datetime('now', '-90 days')"
         )
+        # Clear expired step-up OTPs (verification windows are checked on read)
+        conn.execute(
+            "UPDATE stepup_auth SET code_hash = NULL, expires_at = NULL, attempts = 0 "
+            "WHERE expires_at IS NOT NULL AND expires_at < datetime('now')"
+        )
 
 
 # ── Audit logging (V-NEW-01 compensating control) ────────────────────────────
@@ -393,6 +422,104 @@ def get_user_email(telegram_id: int) -> str | None:
             (telegram_id,),
         ).fetchone()
     return row["email"] if row else None
+
+
+# ── Step-up verification helpers (email OTP) ───────────────────────────────────
+
+def get_stepup_state(telegram_id: int) -> dict | None:
+    """Return step-up auth state for a user (OTP + verification window)."""
+    with get_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT code_hash, expires_at, verified_until, last_sent_at, attempts
+            FROM stepup_auth WHERE telegram_id = ?
+            """,
+            (telegram_id,),
+        ).fetchone()
+    if not row:
+        return None
+    return {
+        "code_hash": row["code_hash"],
+        "expires_at": row["expires_at"],
+        "verified_until": row["verified_until"],
+        "last_sent_at": row["last_sent_at"],
+        "attempts": row["attempts"] or 0,
+    }
+
+
+def set_stepup_code(telegram_id: int, code_hash: str, expires_at: str, sent_at: str) -> None:
+    """Store a new step-up OTP hash and expiry."""
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO stepup_auth (telegram_id, code_hash, expires_at, last_sent_at, attempts, verified_until)
+            VALUES (?, ?, ?, ?, 0, NULL)
+            ON CONFLICT(telegram_id) DO UPDATE SET
+                code_hash     = excluded.code_hash,
+                expires_at    = excluded.expires_at,
+                last_sent_at  = excluded.last_sent_at,
+                attempts      = 0,
+                verified_until = NULL
+            """,
+            (telegram_id, code_hash, expires_at, sent_at),
+        )
+
+
+def set_stepup_verified(telegram_id: int, verified_until: str) -> None:
+    """Mark user as verified for a short window and clear any pending OTP."""
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO stepup_auth (telegram_id, verified_until, attempts)
+            VALUES (?, ?, 0)
+            ON CONFLICT(telegram_id) DO UPDATE SET
+                verified_until = excluded.verified_until,
+                code_hash = NULL,
+                expires_at = NULL,
+                attempts = 0
+            """,
+            (telegram_id, verified_until),
+        )
+
+
+def clear_stepup_code(telegram_id: int) -> None:
+    """Clear any pending OTP for the user."""
+    with get_connection() as conn:
+        conn.execute(
+            """
+            UPDATE stepup_auth
+            SET code_hash = NULL, expires_at = NULL, attempts = 0
+            WHERE telegram_id = ?
+            """,
+            (telegram_id,),
+        )
+
+
+def increment_stepup_attempt(telegram_id: int) -> int:
+    """Increment failed OTP attempt count and return the new count."""
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE stepup_auth SET attempts = COALESCE(attempts, 0) + 1 WHERE telegram_id = ?",
+            (telegram_id,),
+        )
+        row = conn.execute(
+            "SELECT attempts FROM stepup_auth WHERE telegram_id = ?",
+            (telegram_id,),
+        ).fetchone()
+    return int(row["attempts"]) if row else 0
+
+
+def is_stepup_verified(telegram_id: int, now_iso: str) -> bool:
+    """Check if user is currently in a verified window."""
+    with get_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT 1 FROM stepup_auth
+            WHERE telegram_id = ? AND verified_until IS NOT NULL AND verified_until > ?
+            """,
+            (telegram_id, now_iso),
+        ).fetchone()
+    return row is not None
 
 
 # ── Anomaly detection helpers ──────────────────────────────────────────────────

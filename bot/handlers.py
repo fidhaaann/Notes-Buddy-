@@ -44,10 +44,14 @@ from bot.commands import (
     cmd_zip,
     cmd_logout,
     cmd_email,
+    cmd_verify,
     cmd_clear,
+    _EMAIL_PATTERN,
 )
 from bot.callbacks import handle_callback
 from bot import formatter, nav, ui
+from db import models
+from services import stepup_auth
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +119,54 @@ async def handle_file_upload(update, context) -> None:
     # Sanitize filename
     safe_filename = _sanitize_filename(file_name)
     try:
+        # Step-up verification for uploads
+        result = await stepup_auth.request_verification(uid, "upload files")
+        status = result.get("status")
+        if status != "verified":
+            assert context.user_data is not None
+            context.user_data["pending_upload"] = {
+                "file_id": file_id,
+                "file_name": safe_filename,
+            }
+            context.user_data["pending_stepup_action"] = "upload files"
+            await update.message.reply_text(
+                formatter.upload_confirm(safe_filename, nav.breadcrumb(uid)),
+                reply_markup=ui.upload_confirm_keyboard(),
+            )
+            if status == "no_email":
+                context.user_data["awaiting_email"] = True
+                await update.message.reply_text(
+                    formatter.stepup_email_required("upload files"),
+                    reply_markup=ui.stepup_email_entry_keyboard(),
+                )
+            elif status == "email_failed":
+                await update.message.reply_text(formatter.stepup_email_failed())
+            elif status == "sent":
+                context.user_data["awaiting_otp"] = True
+                await update.message.reply_text(
+                    formatter.stepup_code_sent(
+                        "upload files",
+                        result.get("email", ""),
+                        result.get("ttl", 10),
+                    ),
+                    reply_markup=ui.stepup_resend_keyboard("upload files"),
+                )
+            elif status == "cooldown":
+                context.user_data["awaiting_otp"] = True
+                await update.message.reply_text(
+                    formatter.stepup_code_pending(
+                        "upload files",
+                        result.get("email", ""),
+                        result.get("retry_after", 60),
+                    ),
+                    reply_markup=ui.stepup_resend_keyboard("upload files"),
+                )
+            else:
+                await update.message.reply_text(
+                    formatter.error("Verification required.", "Use /verify <code>")
+                )
+            return
+
         tg_file = await context.bot.get_file(file_id)
         file_bytes = await tg_file.download_as_bytearray()
 
@@ -133,6 +185,137 @@ async def handle_file_upload(update, context) -> None:
         logger.exception("File upload error")
         await update.message.reply_text(
             formatter.error("Upload failed.", "Try again or check your connection.")
+        )
+
+
+async def handle_text_input(update, context) -> None:
+    """Handle guided email/OTP input without requiring commands."""
+    if not update.message or not update.message.text:
+        return
+
+    assert context.user_data is not None
+    uid = update.effective_user.id
+    text = update.message.text.strip()
+
+    # Require authentication for guided flows
+    from bot.commands import _is_authenticated
+    if not _is_authenticated(uid):
+        await update.message.reply_text(formatter.login_required())
+        return
+
+    if context.user_data.get("awaiting_email"):
+        if not _EMAIL_PATTERN.match(text):
+            await update.message.reply_text(
+                formatter.error(
+                    "Invalid email format.",
+                    "Reply with a valid address like user@example.com",
+                )
+            )
+            return
+
+        if models.set_user_email(uid, text):
+            context.user_data.pop("awaiting_email", None)
+            await update.message.reply_text(
+                f"✅ Email updated\n\n"
+                f"Address: {text}\n\n"
+                "You will receive security alerts at this email if suspicious activity is detected."
+            )
+
+            pending_action = context.user_data.get("pending_stepup_action")
+            if pending_action:
+                result = await stepup_auth.request_verification(uid, pending_action)
+                status = result.get("status")
+                if status == "verified":
+                    context.user_data.pop("pending_stepup_action", None)
+                    await update.message.reply_text(
+                        formatter.stepup_verified(result.get("window", 5)),
+                        reply_markup=ui.post_login_keyboard(),
+                    )
+                elif status == "sent":
+                    context.user_data["awaiting_otp"] = True
+                    await update.message.reply_text(
+                        formatter.stepup_code_sent(
+                            pending_action,
+                            result.get("email", ""),
+                            result.get("ttl", 10),
+                        ),
+                        reply_markup=ui.stepup_resend_keyboard(pending_action),
+                    )
+                elif status == "cooldown":
+                    context.user_data["awaiting_otp"] = True
+                    await update.message.reply_text(
+                        formatter.stepup_code_pending(
+                            pending_action,
+                            result.get("email", ""),
+                            result.get("retry_after", 60),
+                        ),
+                        reply_markup=ui.stepup_resend_keyboard(pending_action),
+                    )
+                elif status == "email_failed":
+                    await update.message.reply_text(formatter.stepup_email_failed())
+            return
+
+        await update.message.reply_text(
+            formatter.error("Failed to update email.", "Please try again later.")
+        )
+        return
+
+    # Passive email capture after login (if user replies with an email)
+    if _EMAIL_PATTERN.match(text) and not models.get_user_email(uid):
+        if models.set_user_email(uid, text):
+            await update.message.reply_text(
+                f"✅ Email updated\n\n"
+                f"Address: {text}\n\n"
+                "You will receive security alerts at this email if suspicious activity is detected."
+            )
+        else:
+            await update.message.reply_text(
+                formatter.error("Failed to update email.", "Please try again later.")
+            )
+        return
+
+    if context.user_data.get("awaiting_otp"):
+        if not (text.isdigit() and len(text) == 6):
+            await update.message.reply_text(
+                formatter.error("Invalid code format.", "Reply with the 6-digit code.")
+            )
+            return
+
+        result = stepup_auth.verify_code(uid, text)
+        status = result.get("status")
+
+        if status == "verified":
+            context.user_data.pop("awaiting_otp", None)
+            context.user_data.pop("pending_stepup_action", None)
+            await update.message.reply_text(
+                formatter.stepup_verified(result.get("window", 5)),
+                reply_markup=ui.post_login_keyboard(),
+            )
+            return
+        if status == "already_verified":
+            context.user_data.pop("awaiting_otp", None)
+            await update.message.reply_text(
+                formatter.stepup_already_verified(result.get("remaining", 1))
+            )
+            return
+        if status == "invalid":
+            await update.message.reply_text(
+                formatter.stepup_invalid_code(result.get("remaining", 0))
+            )
+            return
+        if status == "expired":
+            context.user_data.pop("awaiting_otp", None)
+            context.user_data.pop("pending_stepup_action", None)
+            await update.message.reply_text(formatter.stepup_code_expired())
+            return
+        if status == "locked":
+            context.user_data.pop("awaiting_otp", None)
+            context.user_data.pop("pending_stepup_action", None)
+            await update.message.reply_text(formatter.stepup_locked())
+            return
+
+        await update.message.reply_text(
+            formatter.error("No active verification.", "Retry the action to get a new code.")
         )
 
 
@@ -170,10 +353,14 @@ def register_handlers(app: Application) -> None:
     # ── Account ───────────────────────────────────────────────────────────────
     app.add_handler(CommandHandler("logout",   cmd_logout))
     app.add_handler(CommandHandler("email",    cmd_email))
+    app.add_handler(CommandHandler("verify",   cmd_verify))
     app.add_handler(CommandHandler("clear",    cmd_clear))
 
     # ── Inline keyboard callbacks ─────────────────────────────────────────────
     app.add_handler(CallbackQueryHandler(handle_callback))
+
+    # ── Guided text input (email / OTP) ───────────────────────────────────────
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_input))
 
     # ── File uploads ──────────────────────────────────────────────────────────
     app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO | filters.VIDEO, handle_file_upload))

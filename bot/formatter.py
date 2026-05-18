@@ -121,6 +121,18 @@ def login_successful() -> str:
     )
 
 
+def email_setup_prompt() -> str:
+    return (
+        "📧 Security Alerts\n"
+        "\n"
+        "Set your email to receive threat notifications.\n"
+        "Reply with your email now (e.g. you@example.com)\n"
+        "or use /email you@example.com\n"
+        "\n"
+        "This helps protect your Drive from unusual activity."
+    )
+
+
 def login_required() -> str:
     return (
         "🔒 Not Authenticated\n"
@@ -203,7 +215,8 @@ def directory_listing(
 
     lines.append("─" * 34)
     lines.append("  /cd <n>  enter   /download <n>")
-    lines.append("  /more <n>  info  /cd  go back")
+    lines.append("  /more <n>  info  /delete <n>")
+    lines.append("  /cd  go back")
 
     return "\n".join(lines)
 
@@ -289,6 +302,123 @@ def confirm_action(action: str, item_name: str) -> str:
         f"  Item: {item_name}\n"
         f"\n"
         f"  This action cannot be undone."
+    )
+
+
+def confirm_delete_preview(meta: Dict, index: str | None = None) -> str:
+    """Confirmation message with a quick preview before deletion."""
+    from services.parser import human_size
+
+    name = meta.get("name", "Unknown")
+    mime = meta.get("mimeType", "Unknown")
+    size_raw = int(meta["size"]) if meta.get("size") else 0
+    size = human_size(size_raw) if size_raw else "Unknown"
+    modified = _format_date(meta.get("modifiedTime", ""))
+    file_type = _file_type_label(mime)
+    path = meta.get("_path", "")
+
+    lines = [
+        "⚠️ Confirm Delete",
+        "",
+        f"  Name:     {name}",
+        f"  Type:     {file_type}",
+        f"  Size:     {size}",
+        f"  Modified: {modified}",
+    ]
+    if index:
+        lines.insert(2, f"  Index:    [{index}]")
+    if path:
+        lines.append(f"  Path:     {path}")
+    lines.extend(["", "  This action cannot be undone."])
+    return "\n".join(lines)
+
+
+def stepup_email_required(action: str) -> str:
+    return (
+        "🔐 Verification Required\n"
+        "\n"
+        f"  To {action}, set your email first.\n"
+        "  Reply with your email now (e.g. you@example.com)\n"
+        "  or use /email you@example.com\n"
+        "\n"
+        "  This protects your account from unauthorized actions."
+    )
+
+
+def stepup_code_sent(action: str, email: str, ttl: int) -> str:
+    return (
+        "🔐 Verification Required\n"
+        "\n"
+        f"  To {action}, enter the code we sent to:\n"
+        f"  {email}\n"
+        "\n"
+        "  Reply with the 6-digit code\n"
+        "  or use /verify <code>\n"
+        f"  Code expires in {ttl} minutes."
+    )
+
+
+def stepup_code_pending(action: str, email: str, retry_after: int) -> str:
+    return (
+        "🔐 Verification Required\n"
+        "\n"
+        f"  A code was already sent to:\n"
+        f"  {email}\n"
+        "\n"
+        "  Reply with the 6-digit code\n"
+        "  or use /verify <code>\n"
+        f"  You can request a new code in {retry_after} seconds."
+    )
+
+
+def stepup_email_failed() -> str:
+    return (
+        "❌ Error\n"
+        "\n"
+        "  Email verification is not configured.\n"
+        "  Contact the administrator."
+    )
+
+
+def stepup_verified(window_min: int) -> str:
+    return (
+        "✅ Verification Complete\n"
+        "\n"
+        f"  You're verified for the next {window_min} minutes.\n"
+        "  Please retry your action."
+    )
+
+
+def stepup_invalid_code(remaining: int) -> str:
+    return (
+        "❌ Invalid Code\n"
+        "\n"
+        f"  Attempts remaining: {remaining}\n"
+        "  Please try again."
+    )
+
+
+def stepup_code_expired() -> str:
+    return (
+        "❌ Code Expired\n"
+        "\n"
+        "  Request a new code by retrying the action."
+    )
+
+
+def stepup_locked() -> str:
+    return (
+        "❌ Too Many Attempts\n"
+        "\n"
+        "  Please request a new code by retrying the action."
+    )
+
+
+def stepup_already_verified(remaining: int) -> str:
+    return (
+        "✅ Already Verified\n"
+        "\n"
+        f"  You are verified for ~{remaining} more minutes."
     )
 
 
@@ -426,13 +556,15 @@ def tools_menu() -> str:
         "  /zip <q>      Download matching files as ZIP\n"
         "\n"
         "Management\n"
-        "  /rename <old> <new>    Rename a file\n"
-        "  /delete <name>        Delete a file\n"
-        "  /move <file> <folder> Move a file\n"
+        "  /rename <n> <new>     Rename by index\n"
+        "  /delete <n>           Delete by index\n"
+        "  /move <f> <d>         Move file to folder by index\n"
         "  /mkdir <name>         Create folder\n"
         "\n"
         "Account\n"
         "  /logout       Disconnect Google Drive\n"
+        "  /email <addr> Set email for security alerts\n"
+        "  /verify <otp> Confirm a sensitive action\n"
         "  /clear        Clear chat messages\n"
         "\n"
         "Help\n"
