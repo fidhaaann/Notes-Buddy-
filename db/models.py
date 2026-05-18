@@ -17,6 +17,7 @@ import os
 import sqlite3
 import stat
 import sys
+from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +115,31 @@ def init_db() -> None:
                 detail      TEXT,
                 created_at  TEXT DEFAULT (datetime('now'))
             );
+
+            CREATE TABLE IF NOT EXISTS user_emails (
+                telegram_id INTEGER PRIMARY KEY,
+                email       TEXT NOT NULL UNIQUE,
+                verified    BOOLEAN DEFAULT 0,
+                created_at  TEXT DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS security_alerts (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_id INTEGER NOT NULL,
+                alert_type  TEXT NOT NULL,
+                description TEXT NOT NULL,
+                action_taken TEXT,
+                created_at  TEXT DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS anomaly_tracking (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_id INTEGER NOT NULL,
+                action      TEXT NOT NULL,
+                count       INTEGER DEFAULT 1,
+                window_start TEXT DEFAULT (datetime('now')),
+                updated_at  TEXT DEFAULT (datetime('now'))
+            );
             """
         )
         # ── Schema migrations for existing databases ──────────────────────────
@@ -122,6 +148,51 @@ def init_db() -> None:
         if "code_verifier" not in cols:
             conn.execute("ALTER TABLE oauth_states ADD COLUMN code_verifier TEXT")
             logger.info("Migrated oauth_states: added code_verifier column.")
+        
+        # Add user_emails table if missing (for alert notifications)
+        tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+        if "user_emails" not in tables:
+            conn.execute(
+                """
+                CREATE TABLE user_emails (
+                    telegram_id INTEGER PRIMARY KEY,
+                    email       TEXT NOT NULL UNIQUE,
+                    verified    BOOLEAN DEFAULT 0,
+                    created_at  TEXT DEFAULT (datetime('now'))
+                )
+                """
+            )
+            logger.info("Created user_emails table for alert notifications.")
+        
+        if "security_alerts" not in tables:
+            conn.execute(
+                """
+                CREATE TABLE security_alerts (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    telegram_id INTEGER NOT NULL,
+                    alert_type  TEXT NOT NULL,
+                    description TEXT NOT NULL,
+                    action_taken TEXT,
+                    created_at  TEXT DEFAULT (datetime('now'))
+                )
+                """
+            )
+            logger.info("Created security_alerts table.")
+        
+        if "anomaly_tracking" not in tables:
+            conn.execute(
+                """
+                CREATE TABLE anomaly_tracking (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    telegram_id INTEGER NOT NULL,
+                    action      TEXT NOT NULL,
+                    count       INTEGER DEFAULT 1,
+                    window_start TEXT DEFAULT (datetime('now')),
+                    updated_at  TEXT DEFAULT (datetime('now'))
+                )
+                """
+            )
+            logger.info("Created anomaly_tracking table.")
     _restrict_db_permissions()
     if _fernet:
         logger.info("Token encryption enabled.")
@@ -167,6 +238,19 @@ def get_user(telegram_id: int) -> dict | None:
         "token": _decrypt(row["token"]),
         "refresh_token": _decrypt(row["refresh_token"]),
     }
+
+
+def get_all_users() -> list[dict]:
+    """Get all registered users (for emergency operations like revoke all)."""
+    with get_connection() as conn:
+        rows = conn.execute("SELECT telegram_id, token FROM users WHERE token IS NOT NULL").fetchall()
+    return [
+        {
+            "telegram_id": row["telegram_id"],
+            "token": _decrypt(row["token"]),
+        }
+        for row in rows
+    ]
 
 
 def delete_user(telegram_id: int) -> None:
@@ -282,3 +366,87 @@ def log_audit(telegram_id: int, action: str, file_id: str | None = None, detail:
             (telegram_id, action, file_id, detail),
         )
     logger.info("AUDIT: user=%s action=%s file_id=%s detail=%s", telegram_id, action, file_id, detail)
+
+
+# ── User email helpers (for security alerts) ──────────────────────────────────
+
+def set_user_email(telegram_id: int, email: str) -> bool:
+    """Store user's email for security alerts. Returns True if successful."""
+    try:
+        with get_connection() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO user_emails (telegram_id, email, verified) VALUES (?, ?, 1)",
+                (telegram_id, email),
+            )
+        logger.info("Email set for user %s: %s", telegram_id, email)
+        return True
+    except Exception as e:
+        logger.error("Failed to set email for user %s: %s", telegram_id, e)
+        return False
+
+
+def get_user_email(telegram_id: int) -> str | None:
+    """Retrieve user's email address for alerts."""
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT email FROM user_emails WHERE telegram_id = ? AND verified = 1",
+            (telegram_id,),
+        ).fetchone()
+    return row["email"] if row else None
+
+
+# ── Anomaly detection helpers ──────────────────────────────────────────────────
+
+def track_action(telegram_id: int, action: str) -> int:
+    """Track action count within 5-minute window. Returns current count."""
+    now = datetime.now().isoformat()
+    window_start = (datetime.now() - timedelta(minutes=5)).isoformat()
+    
+    with get_connection() as conn:
+        # Check if tracking record exists and is within window
+        row = conn.execute(
+            """
+            SELECT id, count FROM anomaly_tracking
+            WHERE telegram_id = ? AND action = ? AND window_start > ?
+            ORDER BY window_start DESC LIMIT 1
+            """,
+            (telegram_id, action, window_start),
+        ).fetchone()
+        
+        if row:
+            # Increment existing counter
+            new_count = row["count"] + 1
+            conn.execute(
+                "UPDATE anomaly_tracking SET count = ?, updated_at = ? WHERE id = ?",
+                (new_count, now, row["id"]),
+            )
+            return new_count
+        else:
+            # Create new tracking record
+            conn.execute(
+                "INSERT INTO anomaly_tracking (telegram_id, action, count, window_start) VALUES (?, ?, 1, ?)",
+                (telegram_id, action, now),
+            )
+            return 1
+
+
+def log_security_alert(telegram_id: int, alert_type: str, description: str, action_taken: str | None = None) -> None:
+    """Log a security alert (e.g., anomaly detected, token revoked)."""
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO security_alerts (telegram_id, alert_type, description, action_taken)
+            VALUES (?, ?, ?, ?)
+            """,
+            (telegram_id, alert_type, description, action_taken),
+        )
+    logger.warning("SECURITY ALERT: user=%s type=%s description=%s action=%s", 
+                   telegram_id, alert_type, description, action_taken)
+
+
+def cleanup_anomaly_tracking() -> None:
+    """Clean up old anomaly tracking records (older than 24 hours)."""
+    with get_connection() as conn:
+        conn.execute(
+            "DELETE FROM anomaly_tracking WHERE window_start < datetime('now', '-24 hours')"
+        )

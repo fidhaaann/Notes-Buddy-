@@ -28,6 +28,7 @@ from drive import drive_service as ds
 from bot import formatter, ui, nav
 from db import models
 from services.parser import human_size
+from services import anomaly_detection
 
 logger = logging.getLogger(__name__)
 
@@ -143,8 +144,13 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         action = parts[1] if len(parts) > 1 else ""
 
         if action == "home":
-            nav.go_home(uid)
-            await _send_browse(uid, query, update)
+            if not _is_authenticated(uid):
+                await _reply(query, update, formatter.login_required())
+            elif nav.current_folder_id(uid) == "root":
+                await _reply(query, update, formatter.already_home())
+            else:
+                nav.go_home(uid)
+                await _send_browse(uid, query, update)
 
         elif action == "back":
             nav.pop_folder(uid)
@@ -231,15 +237,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 except Exception:
                     continue
                 await asyncio.sleep(0.05)
-            confirm = await context.bot.send_message(
+            await context.bot.send_message(
                 chat_id=chat_id,
                 text=f"🧹 Cleared {deleted} messages.",
             )
-            await asyncio.sleep(3)
-            try:
-                await confirm.delete()
-            except Exception:
-                pass
 
         return
 
@@ -332,6 +333,16 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         if action == "delete":
             try:
+                # Check for anomaly before deleting
+                if await anomaly_detection.check_anomaly(uid, "delete"):
+                    await _reply(query, update, formatter.error(
+                        "⛔ Unusual Activity Detected",
+                        "Your Google Drive access has been suspended for security.\n\n"
+                        "Check your email and Telegram for alerts.\n"
+                        "Use /login to reconnect when ready."
+                    ))
+                    return
+                
                 ds.delete_file(uid, file_id)
                 await _reply(
                     query, update,

@@ -76,6 +76,19 @@ def welcome_unauthenticated() -> str:
     )
 
 
+def oauth_scope_warning() -> str:
+    return (
+        "⚠️ Permission Notice\n"
+        "\n"
+        "Logging in grants this bot access to:\n"
+        "  • View all files and folders\n"
+        "  • Upload, download, and modify files\n"
+        "  • Delete files and create folders\n"
+        "\n"
+        "You can revoke access anytime with /logout."
+    )
+
+
 def welcome_authenticated() -> str:
     return (
         "✅ Welcome Back\n"
@@ -285,7 +298,7 @@ def upload_mode_enabled() -> str:
     return (
         "📤 Upload Mode\n"
         "\n"
-        "  Send the file you want to upload.\n"
+        "  Send a document, image, or video to upload.\n"
         "  It will be saved to your current directory.\n"
         "\n"
         "  Type /cancel to exit upload mode."
@@ -397,7 +410,7 @@ def current_path(path: str) -> str:
 
 def tools_menu() -> str:
     return (
-        "⚙️ Command Reference\n"
+        "🛠️ Keywords & Abilities\n"
         "\n"
         "Navigation\n"
         "  /info         List current directory\n"
@@ -421,8 +434,16 @@ def tools_menu() -> str:
         "Account\n"
         "  /logout       Disconnect Google Drive\n"
         "  /clear        Clear chat messages\n"
+        "\n"
+        "Help\n"
+        "  /help         Show this guide\n"
+        "  /tool         Show this guide\n"
     )
 
 
 def main_menu() -> str:
     return "📌 Main Menu\n\nSelect an option below."
+
+
+def already_home() -> str:
+    return "You are already in the home page."

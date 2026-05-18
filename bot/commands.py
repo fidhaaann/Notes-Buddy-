@@ -4,13 +4,15 @@ All /command handlers.
 
 Implements the terminal-style navigation system with hierarchical indexing.
 Commands: /start, /info, /cd, /pwd, /download, /more, /upload, /search,
-          /zip, /rename, /delete, /move, /mkdir, /logout, /clear, /menu, /help
+          /zip, /rename, /delete, /move, /mkdir, /logout, /email, /clear, /menu, /help, /tool
 
 Security:
   - Input validation on all index parameters
   - Error message sanitization (never expose raw exceptions)
   - Per-user rate limiting on expensive operations
   - Filename sanitization on ZIP output
+  - Email validation for security alerts
+  - Anomaly detection for suspicious patterns
 """
 
 import asyncio
@@ -29,9 +31,13 @@ from bot import formatter, ui
 from bot import nav
 from services import parser as p
 from services.zip_service import create_zip
+from services import anomaly_detection
 from db import models
 
 logger = logging.getLogger(__name__)
+
+# Email validation
+_EMAIL_PATTERN = re.compile(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$')
 
 # Safety limits
 MAX_ZIP_FILES = 20
@@ -98,11 +104,15 @@ def _safe_error(e: Exception) -> str:
     msg = re.sub(r'/[^\s]*/', '[path]/', msg)
     # Strip Google OAuth access tokens (ya29.xxx)
     msg = re.sub(r'ya29\.[A-Za-z0-9_.-]+', '[redacted]', msg)
-    # Strip anything that looks like a token/key (20+ alphanumeric chars)
-    msg = re.sub(r'[A-Za-z0-9_-]{20,}', '[redacted]', msg)
+    # Strip Fernet tokens
+    msg = re.sub(r'gAAAAA[A-Za-z0-9_/+-]{20,}', '[redacted]', msg)
+    # Strip generic secrets (40+ chars)
+    msg = re.sub(r'(?<=["\s=:])[A-Za-z0-9_/+-]{40,}', '[redacted]', msg)
+    # Strip Google Drive file IDs (25-50 char identifiers)
+    msg = re.sub(r'\b[A-Za-z0-9_-]{25,50}\b', '[id]', msg)
     # Truncate very long messages
     if len(msg) > 200:
-        msg = msg[:200] + "..."
+        msg = msg[:197] + "..."
     return msg
 
 
@@ -170,6 +180,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         # Generate OAuth URL and send as inline button (never raw URL)
         try:
             auth_url = drive_auth.get_auth_url(uid)
+            await _msg(update).reply_text(formatter.oauth_scope_warning())
             await _msg(update).reply_text(
                 formatter.welcome_unauthenticated(),
                 reply_markup=ui.login_keyboard(auth_url),
@@ -789,15 +800,10 @@ async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             continue
         await asyncio.sleep(0.05)
 
-    confirm = await context.bot.send_message(
+    await context.bot.send_message(
         chat_id=chat_id,
         text=f"🧹 Cleared {deleted} messages.",
     )
-    await asyncio.sleep(3)
-    try:
-        await confirm.delete()
-    except Exception:
-        pass
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -816,3 +822,65 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         formatter.tools_menu(),
         reply_markup=ui.back_to_menu_keyboard(),
     )
+
+
+async def cmd_tool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await cmd_help(update, context)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# /email  — Set email for security alerts
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def cmd_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Set user's email address for security alerts."""
+    uid = _uid(update)
+    args = p.parse_command_text(_text(update))
+    
+    if not _is_authenticated(uid):
+        await _msg(update).reply_text(formatter.login_required())
+        return
+    
+    if not args:
+        # Show current email
+        current_email = models.get_user_email(uid)
+        if current_email:
+            await _msg(update).reply_text(
+                f"📧 Your current email: {current_email}\n\n"
+                "Usage: /email <your-email@example.com>"
+            )
+        else:
+            await _msg(update).reply_text(
+                "📧 Security Alerts\n\n"
+                "Set your email to receive alerts if unusual activity is detected.\n\n"
+                "Usage: /email your-email@example.com"
+            )
+        return
+    
+    email = " ".join(args).strip()
+    
+    # Validate email format
+    if not _EMAIL_PATTERN.match(email):
+        await _msg(update).reply_text(
+            formatter.error(
+                "Invalid email format.",
+                f"Please use a valid email like: user@example.com"
+            )
+        )
+        return
+    
+    # Store email
+    if models.set_user_email(uid, email):
+        await _msg(update).reply_text(
+            f"✅ Email updated\n\n"
+            f"Address: {email}\n\n"
+            "You will receive security alerts at this email if suspicious activity is detected."
+        )
+        logger.info("Email set for user %s: %s", uid, email)
+    else:
+        await _msg(update).reply_text(
+            formatter.error(
+                "Failed to update email.",
+                "Please try again later."
+            )
+        )

@@ -6,7 +6,7 @@ Called once from main.py.
 Handler registration order:
   1. Commands (highest priority)
   2. Inline keyboard callbacks
-  3. File upload handler (document messages)
+  3. File upload handler (documents, images, videos)
 
 Security:
   - Upload size validation
@@ -28,6 +28,7 @@ from bot.commands import (
     cmd_start,
     cmd_menu,
     cmd_help,
+    cmd_tool,
     cmd_info,
     cmd_cd,
     cmd_pwd,
@@ -42,6 +43,7 @@ from bot.commands import (
     cmd_mkdir,
     cmd_zip,
     cmd_logout,
+    cmd_email,
     cmd_clear,
 )
 from bot.callbacks import handle_callback
@@ -55,12 +57,9 @@ MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 
 async def handle_file_upload(update, context) -> None:
     """
-    Handles document messages.
+    Handles document, image, and video messages.
 
-    If upload_mode is active:
-      - Cache the file and ask for confirmation.
-    Otherwise:
-      - Upload directly to current Drive folder (legacy behavior).
+    Uploads directly to the current Drive folder.
 
     Security:
       - Validates file size before downloading
@@ -70,9 +69,14 @@ async def handle_file_upload(update, context) -> None:
     from drive.drive_service import upload_file, _sanitize_filename
 
     uid = update.effective_user.id
-    doc = update.message.document
+    if not update.message:
+        return
 
-    if not doc:
+    doc = update.message.document
+    video = update.message.video
+    photo = update.message.photo[-1] if update.message.photo else None
+
+    if not doc and not video and not photo:
         return
 
     # Check authentication first
@@ -82,43 +86,46 @@ async def handle_file_upload(update, context) -> None:
         return
 
     # Validate file size before downloading (defense in depth)
-    if doc.file_size and doc.file_size > MAX_UPLOAD_BYTES:
+    file_size = None
+    file_id = ""
+    file_name = ""
+
+    if doc:
+        file_id = doc.file_id
+        file_size = doc.file_size
+        file_name = doc.file_name or "unnamed_file"
+    elif video:
+        file_id = video.file_id
+        file_size = video.file_size
+        file_name = video.file_name or f"video_{video.file_unique_id}.mp4"
+    elif photo:
+        file_id = photo.file_id
+        file_size = photo.file_size
+        file_name = f"photo_{photo.file_unique_id}.jpg"
+
+    if file_size and file_size > MAX_UPLOAD_BYTES:
         await update.message.reply_text(
             formatter.error(
-                f"File too large ({doc.file_size // (1024*1024)} MB).",
+                f"File too large ({file_size // (1024*1024)} MB).",
                 f"Maximum upload size is {MAX_UPLOAD_BYTES // (1024*1024)} MB.",
             )
         )
         return
 
     # Sanitize filename
-    safe_filename = _sanitize_filename(doc.file_name or "unnamed_file")
-    upload_mode = context.user_data.get("upload_mode", False)
-
+    safe_filename = _sanitize_filename(file_name)
     try:
-        tg_file = await context.bot.get_file(doc.file_id)
+        tg_file = await context.bot.get_file(file_id)
         file_bytes = await tg_file.download_as_bytearray()
 
-        if upload_mode:
-            # Store pending upload and ask for confirmation
-            context.user_data["pending_upload"] = {
-                "file_bytes": bytes(file_bytes),
-                "file_name": safe_filename,
-            }
-            destination = nav.breadcrumb(uid)
-            await update.message.reply_text(
-                formatter.upload_confirm(safe_filename, destination),
-                reply_markup=ui.upload_confirm_keyboard(),
-            )
-        else:
-            # Direct upload (no confirmation)
-            await update.message.reply_text(formatter.processing("Uploading"))
-            fid = nav.current_folder_id(uid)
-            uploaded = upload_file(uid, bytes(file_bytes), safe_filename, parent_id=fid)
-            await update.message.reply_text(
-                formatter.upload_success(uploaded["name"], nav.breadcrumb(uid)),
-                reply_markup=ui.post_login_keyboard(),
-            )
+        # Direct upload (no confirmation)
+        await update.message.reply_text(formatter.processing("Uploading"))
+        fid = nav.current_folder_id(uid)
+        uploaded = upload_file(uid, bytes(file_bytes), safe_filename, parent_id=fid)
+        await update.message.reply_text(
+            formatter.upload_success(uploaded["name"], nav.breadcrumb(uid)),
+            reply_markup=ui.post_login_keyboard(),
+        )
 
     except PermissionError:
         await update.message.reply_text(formatter.login_required())
@@ -134,6 +141,7 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("start",    cmd_start))
     app.add_handler(CommandHandler("menu",     cmd_menu))
     app.add_handler(CommandHandler("help",     cmd_help))
+    app.add_handler(CommandHandler("tool",     cmd_tool))
 
     # ── Navigation ────────────────────────────────────────────────────────────
     app.add_handler(CommandHandler("info",     cmd_info))
@@ -161,12 +169,13 @@ def register_handlers(app: Application) -> None:
 
     # ── Account ───────────────────────────────────────────────────────────────
     app.add_handler(CommandHandler("logout",   cmd_logout))
+    app.add_handler(CommandHandler("email",    cmd_email))
     app.add_handler(CommandHandler("clear",    cmd_clear))
 
     # ── Inline keyboard callbacks ─────────────────────────────────────────────
     app.add_handler(CallbackQueryHandler(handle_callback))
 
     # ── File uploads ──────────────────────────────────────────────────────────
-    app.add_handler(MessageHandler(filters.Document.ALL, handle_file_upload))
+    app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO | filters.VIDEO, handle_file_upload))
 
     logger.info("All handlers registered successfully.")
