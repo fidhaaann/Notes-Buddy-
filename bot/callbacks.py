@@ -23,6 +23,7 @@ import re
 
 from telegram import Update
 from telegram.ext import ContextTypes
+from googleapiclient.errors import HttpError
 
 from drive import drive_service as ds
 from bot import formatter, ui, nav
@@ -136,8 +137,18 @@ async def _send_browse(uid: int, query, update) -> None:
         fid = nav.current_folder_id(uid)
         path = nav.breadcrumb(uid)
 
-        folders = ds.list_folders(uid, parent_id=fid)
-        files = ds.list_files(uid, parent_id=fid)
+        try:
+            folders = ds.list_folders(uid, parent_id=fid)
+            files = ds.list_files(uid, parent_id=fid)
+        except HttpError as e:
+            if getattr(e, "resp", None) and e.resp.status == 404:
+                nav.go_home(uid)
+                fid = nav.current_folder_id(uid)
+                path = nav.breadcrumb(uid)
+                folders = ds.list_folders(uid, parent_id=fid)
+                files = ds.list_files(uid, parent_id=fid)
+            else:
+                raise
 
         # Build one level of children for expanded view
         children_map: dict[str, tuple[list[dict], list[dict]]] = {}
