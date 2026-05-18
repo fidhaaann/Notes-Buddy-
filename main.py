@@ -148,14 +148,21 @@ async def oauth_callback(request: Request):
 
         # ── Notify the user inside Telegram ───────────────────────────────────
         if _bot_app is not None:
-            from bot.formatter import login_successful
-            from bot.ui import post_login_keyboard
+            from bot.formatter import login_successful, email_setup_prompt
+            from bot.ui import post_login_keyboard, stepup_email_entry_keyboard
+            from db import models
             try:
                 await _bot_app.bot.send_message(
                     chat_id=telegram_id,
                     text=login_successful(),
                     reply_markup=post_login_keyboard(),
                 )
+                if not models.get_user_email(telegram_id):
+                    await _bot_app.bot.send_message(
+                        chat_id=telegram_id,
+                        text=email_setup_prompt(),
+                        reply_markup=stepup_email_entry_keyboard(),
+                    )
             except Exception:
                 logger.warning("Could not send success message to user %s", telegram_id)
 
