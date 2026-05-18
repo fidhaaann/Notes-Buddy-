@@ -300,6 +300,17 @@ async def cmd_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await _msg(update).reply_text(formatter.login_required())
     except Exception as e:
         logger.exception("cmd_info error")
+        if isinstance(e, HttpError):
+            status = getattr(e, "resp", None)
+            if status and status.status in (400, 401, 403, 404, 410):
+                try:
+                    drive_auth.revoke_token(uid)
+                    models.delete_user(uid)
+                    nav.clear_user(uid)
+                except Exception:
+                    pass
+                await _msg(update).reply_text(formatter.login_required())
+                return
         await _msg(update).reply_text(
             formatter.error(
                 "Could not load directory listing.",

@@ -173,6 +173,18 @@ async def _send_browse(uid: int, query, update) -> None:
         await _reply(query, update, formatter.login_required())
     except Exception as e:
         logger.exception("_send_browse error")
+        if isinstance(e, HttpError):
+            status = getattr(e, "resp", None)
+            if status and status.status in (400, 401, 403, 404, 410):
+                try:
+                    from drive import auth as drive_auth
+                    drive_auth.revoke_token(uid)
+                    models.delete_user(uid)
+                    nav.clear_user(uid)
+                except Exception:
+                    pass
+                await _reply(query, update, formatter.login_required())
+                return
         await _reply(query, update, formatter.error(
             "Could not load directory.", "Try again or use /start."
         ))
