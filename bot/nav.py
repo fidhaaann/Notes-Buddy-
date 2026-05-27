@@ -1,11 +1,13 @@
 """
 bot/nav.py
-Session-based navigation state and hierarchical index mapping.
+Session-based navigation with context-aware active view indexing.
 
 Each user has:
   - A folder breadcrumb stack (for cd / pwd / back)
-  - A cached index map built from the last /info listing, so commands
-    like /download 1.2, /more 1.1.1, /cd 2 can resolve items by index.
+  - An active view context (folder, search, recent, etc.)
+  - Simple 1, 2, 3 indexing that's always relative to current view
+
+No global index maps. No collisions. No prefixes.
 
 Security: Stack depth is capped, and old inactive users are evicted.
 """
@@ -17,21 +19,31 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Optional
 
-# ── Per-item metadata stored in the index map ─────────────────────────────────
+# ── Per-item metadata in index maps ───────────────────────────────────────────
 
 @dataclass
 class IndexedItem:
-    """Represents one item (file or folder) in a hierarchical listing."""
+    """Represents one item (file or folder) in a listing."""
     id: str
     name: str
     mime_type: str
     is_folder: bool
-    parent_index: str          # e.g. "1" for a child of folder [1]
-    full_index: str            # e.g. "1.2"
+    parent_index: str          # (deprecated, kept for compatibility)
+    full_index: str            # "1", "2", "3" in current view
     is_shortcut: bool = False
     shortcut_target_id: Optional[str] = None
     shortcut_target_mime_type: Optional[str] = None
     path: str = ""             # full Drive path string
+
+
+# ── Active view context ──────────────────────────────────────────────────────
+
+@dataclass
+class ViewContext:
+    """Represents the current active view and its index mappings."""
+    view_type: str                                 # "folder", "search", "recent", etc.
+    index_map: dict[str, IndexedItem]              # Simple: "1" → item, "2" → item
+    metadata: dict = field(default_factory=dict)   # Additional context (keyword, folder_id, etc.)
 
 
 # ── Per-user session ──────────────────────────────────────────────────────────
@@ -39,7 +51,7 @@ class IndexedItem:
 @dataclass
 class _UserSession:
     stack: list[tuple[str, str]] = field(default_factory=lambda: [("root", "Home")])
-    index_map: dict[str, IndexedItem] = field(default_factory=dict)
+    active_view: Optional[ViewContext] = None
     last_access: float = field(default_factory=time.monotonic)
 
 
@@ -110,23 +122,94 @@ def clear_user(uid: int) -> None:
     _sessions.pop(uid, None)
 
 
-# ── Hierarchical index map ────────────────────────────────────────────────────
+# ── View context management ──────────────────────────────────────────────────
+
+def set_active_view(
+    uid: int,
+    view_type: str,
+    index_map: dict[str, IndexedItem],
+    metadata: dict = None,
+) -> None:
+    """
+    Set the active view context.
+    
+    Replaces any previous view. New index map becomes active.
+    Users always resolve commands against this context.
+    """
+    s = _get(uid)
+    s.active_view = ViewContext(
+        view_type=view_type,
+        index_map=index_map,
+        metadata=metadata or {},
+    )
+
+
+def get_active_view(uid: int) -> Optional[ViewContext]:
+    """Get current active view context."""
+    s = _get(uid)
+    return s.active_view
+
+
+def set_active_view_metadata(uid: int, key: str, value: str) -> None:
+    """Update metadata on active view."""
+    s = _get(uid)
+    if s.active_view:
+        s.active_view.metadata[key] = value
+
+
+def get_active_view_metadata(uid: int, key: str, default=None) -> Optional[str]:
+    """Retrieve metadata from active view."""
+    s = _get(uid)
+    if s.active_view:
+        return s.active_view.metadata.get(key, default)
+    return default
+
+
+def clear_view(uid: int) -> None:
+    """Clear active view (e.g., on logout)."""
+    s = _get(uid)
+    s.active_view = None
+
+
+# ── Index resolution against active view ──────────────────────────────────────
+
+def resolve_index(uid: int, index: str) -> Optional[IndexedItem]:
+    """
+    Resolve an index against the CURRENT ACTIVE VIEW.
+    
+    This is the primary way to look up items.
+    Returns None if no active view or index not found.
+    """
+    s = _get(uid)
+    if not s.active_view:
+        return None
+    return s.active_view.index_map.get(index)
+
+
+def resolve_index_silent(uid: int, index: str) -> Optional[IndexedItem]:
+    """Alias for resolve_index() for backward compatibility."""
+    return resolve_index(uid, index)
+
+
+def get_index_map(uid: int) -> dict[str, IndexedItem]:
+    """Get current active view's index map."""
+    s = _get(uid)
+    if s.active_view:
+        return s.active_view.index_map
+    return {}
+
 
 def build_flat_index_map(uid: int, folders: list[dict], files: list[dict]) -> dict[str, IndexedItem]:
     """
-    Build a flat index map from the current folder listing.
-
-    Folders are numbered 1, 2, 3, ...
-    Files continue the numbering.
-
-    Returns the map and also caches it on the user session.
+    Build a flat index map from folder and file listings.
+    
+    Returns index_map only. Caller must call set_active_view() to activate it.
+    This separates index building from view activation.
     """
-    s = _get(uid)
-    s.index_map.clear()
-
     path = breadcrumb(uid)
+    index_map: dict[str, IndexedItem] = {}
 
-    # Folders first, then files — each at top level
+    # Folders first: 1, 2, 3, ...
     folder_counter = 0
     for f in folders:
         folder_counter += 1
@@ -143,8 +226,9 @@ def build_flat_index_map(uid: int, folders: list[dict], files: list[dict]) -> di
             full_index=idx,
             path=path,
         )
-        s.index_map[idx] = item
+        index_map[idx] = item
 
+    # Files continue: folder_counter+1, folder_counter+2, ...
     file_counter = 0
     for f in files:
         file_counter += 1
@@ -161,20 +245,11 @@ def build_flat_index_map(uid: int, folders: list[dict], files: list[dict]) -> di
             full_index=idx,
             path=path,
         )
-        s.index_map[idx] = item
+        index_map[idx] = item
 
-    return s.index_map
+    return index_map
 
 
 def build_index_map(uid: int, folders: list[dict], files: list[dict]) -> dict[str, IndexedItem]:
-    """Alias for backward compatibility."""
+    """Alias for backward compatibility. Use build_flat_index_map() instead."""
     return build_flat_index_map(uid, folders, files)
-
-def resolve_index(uid: int, index: str) -> Optional[IndexedItem]:
-    """Look up a cached item by its hierarchical index string."""
-    s = _get(uid)
-    return s.index_map.get(index)
-
-
-def get_index_map(uid: int) -> dict[str, IndexedItem]:
-    return _get(uid).index_map

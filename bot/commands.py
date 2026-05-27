@@ -277,6 +277,9 @@ async def cmd_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         files = listing.files
 
         index_map = nav.build_flat_index_map(uid, folders, files)
+        
+        # Set as active view: folder browsing context
+        nav.set_active_view(uid, "folder", index_map, metadata={"folder_id": fid})
 
         text = formatter.directory_listing(path, index_map, folders, files)
         if listing.error_count or listing.truncated:
@@ -343,11 +346,13 @@ async def cmd_cd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     # Validate index format
     index = args[0].strip()
-    if not _validate_index(index):
+    
+    # Validate as simple integer
+    if not index.isdigit():
         await _msg(update).reply_text(
             formatter.error(
-                "Invalid index format.",
-                "Use indices like 1, 1.2, or 1.2.3 from the /info listing.",
+                "Invalid index.",
+                "Use numbers like: /cd 1, /cd 2",
             )
         )
         return
@@ -357,7 +362,7 @@ async def cmd_cd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not item:
         await _msg(update).reply_text(
             formatter.error(
-                f"Index [{index}] not found.",
+                f"Invalid selection [{index}].",
                 "Use /info to see the current directory listing.",
             )
         )
@@ -414,17 +419,19 @@ async def cmd_download(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await _msg(update).reply_text(
             formatter.error(
                 "Missing index.",
-                "Usage: /download <index>  (e.g. /download 1.2)",
+                "Usage: /download <index>  (e.g. /download 1)",
             )
         )
         return
 
     index = args[0].strip()
-    if not _validate_index(index):
+    
+    # Validate as simple integer
+    if not index.isdigit():
         await _msg(update).reply_text(
             formatter.error(
-                "Invalid index format.",
-                "Use indices like 1, 1.2, or 1.2.3 from the /info listing.",
+                "Invalid index.",
+                "Use numbers like: /download 1, /download 2",
             )
         )
         return
@@ -432,12 +439,23 @@ async def cmd_download(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     item = nav.resolve_index(uid, index)
 
     if not item:
-        await _msg(update).reply_text(
-            formatter.error(
-                f"Index [{index}] not found.",
-                "Use /info to see the current directory listing.",
+        # Get current view info for better error message
+        view = nav.get_active_view(uid)
+        if view:
+            max_idx = len(view.index_map)
+            await _msg(update).reply_text(
+                formatter.error(
+                    f"Invalid selection [{index}].",
+                    f"Please choose a valid item (1-{max_idx}). Use /info or /search to see available items.",
+                )
             )
-        )
+        else:
+            await _msg(update).reply_text(
+                formatter.error(
+                    "No active view.",
+                    "Use /info to browse or /search to search.",
+                )
+            )
         return
 
     if item.is_folder:
@@ -535,17 +553,19 @@ async def cmd_more(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await _msg(update).reply_text(
             formatter.error(
                 "Missing index.",
-                "Usage: /more <index>  (e.g. /more 1.2)",
+                "Usage: /more <index>  (e.g. /more 1)",
             )
         )
         return
 
     index = args[0].strip()
-    if not _validate_index(index):
+    
+    # Validate as simple integer
+    if not index.isdigit():
         await _msg(update).reply_text(
             formatter.error(
-                "Invalid index format.",
-                "Use indices like 1, 1.2, or 1.2.3 from the /info listing.",
+                "Invalid index.",
+                "Use numbers like: /more 1, /more 2",
             )
         )
         return
@@ -638,8 +658,29 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     try:
         files = ds.search_files(uid, keyword)
+        
+        # Build proper IndexedItem objects for search results
+        index_map: dict[str, nav.IndexedItem] = {}
+        for i, f in enumerate(files, 1):
+            idx = str(i)
+            index_map[idx] = nav.IndexedItem(
+                id=f["id"],
+                name=f["name"],
+                mime_type=f.get("mimeType", ""),
+                is_folder="folder" in f.get("mimeType", "").lower(),
+                parent_index="",
+                full_index=idx,
+                is_shortcut=False,
+                shortcut_target_id=None,
+                shortcut_target_mime_type=None,
+                path=f"Search: {keyword}",
+            )
+        
+        # Set as active view: search results context
+        nav.set_active_view(uid, "search", index_map, metadata={"keyword": keyword})
+        
         await _msg(update).reply_text(
-            formatter.search_results(keyword, files),
+            formatter.search_results_indexed(keyword, index_map),
             reply_markup=ui.back_to_menu_keyboard(),
         )
     except PermissionError:

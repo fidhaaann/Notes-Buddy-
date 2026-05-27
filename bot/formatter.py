@@ -472,6 +472,7 @@ def upload_success(filename: str, location: str) -> str:
 # ── Search ────────────────────────────────────────────────────────────────────
 
 def search_results(keyword: str, files: List[Dict]) -> str:
+    """Legacy search results formatter. Use search_results_indexed() instead."""
     if not files:
         return (
             f"🔍 No Results\n"
@@ -485,6 +486,31 @@ def search_results(keyword: str, files: List[Dict]) -> str:
     for i, f in enumerate(files, 1):
         icon = _file_icon(f.get("mimeType", ""))
         lines.append(f"  [{i}]  {icon} {f['name']}")
+    return "\n".join(lines)
+
+
+def search_results_indexed(keyword: str, index_map: dict[str, IndexedItem]) -> str:
+    """Format search results with proper IndexedItem index mapping."""
+    if not index_map:
+        return (
+            f"🔍 No Results for \"{keyword}\"\n"
+            f"\n"
+            f"  No items matched.\n"
+            f"\n"
+            f"  Suggestion: Try a different keyword or use /info."
+        )
+
+    lines = [f"🔍 Search Results for \"{keyword}\"", ""]
+    
+    # Sort indices numerically (1, 2, 3, ...)
+    for idx in sorted(index_map.keys(), key=lambda x: int(x)):
+        item = index_map[idx]
+        icon = _file_icon(item.mime_type)
+        lines.append(f"  [{idx}]  {icon} {item.name}")
+    
+    lines.append("")
+    lines.append("─" * 34)
+    lines.append("  /download <n>  /more <n>")
     return "\n".join(lines)
 
 

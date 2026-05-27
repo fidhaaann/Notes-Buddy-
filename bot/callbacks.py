@@ -155,6 +155,10 @@ async def _send_browse(uid: int, query, update) -> None:
         files = listing.files
 
         index_map = nav.build_flat_index_map(uid, folders, files)
+        
+        # Set as active view: folder browsing context
+        nav.set_active_view(uid, "folder", index_map, metadata={"folder_id": fid})
+        
         text = formatter.directory_listing(path, index_map, folders, files)
         if listing.error_count or listing.truncated:
             text = (
