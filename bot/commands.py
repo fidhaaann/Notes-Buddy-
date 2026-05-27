@@ -260,36 +260,34 @@ async def cmd_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         path = nav.breadcrumb(uid)
 
         try:
-            folders = ds.list_folders(uid, parent_id=fid)
-            files = ds.list_files(uid, parent_id=fid)
+            listing = ds.list_directory(uid, parent_id=fid, expand_children=True, depth_limit=1)
         except HttpError as e:
             status = getattr(e, "resp", None)
             if status and status.status in (400, 404, 410):
                 nav.go_home(uid)
                 fid = nav.current_folder_id(uid)
                 path = nav.breadcrumb(uid)
-                folders = ds.list_folders(uid, parent_id=fid)
-                files = ds.list_files(uid, parent_id=fid)
+                listing = ds.list_directory(uid, parent_id=fid, expand_children=True, depth_limit=1)
             elif status and status.status in (401, 403):
                 raise PermissionError("User not authenticated.") from e
             else:
                 raise
 
-        # Build one level of children for each folder (expanded view)
-        children_map: dict[str, tuple[list[dict], list[dict]]] = {}
-        for f in folders:
-            try:
-                sub_folders = ds.list_folders(uid, parent_id=f["id"])
-                sub_files = ds.list_files(uid, parent_id=f["id"])
-                if sub_folders or sub_files:
-                    children_map[f["id"]] = (sub_folders, sub_files)
-            except Exception:
-                continue
+        folders = listing.folders
+        files = listing.files
+        children_map = listing.children_map
 
-        # Build hierarchical index map
         index_map = nav.build_deep_index_map(uid, folders, files, children_map)
 
         text = formatter.directory_listing(path, index_map, folders, files)
+        if listing.error_count or listing.truncated or listing.used_fallback:
+            text = (
+                formatter.partial_browse_warning(
+                    listing.error_count, listing.truncated, listing.used_fallback
+                )
+                + "\n\n"
+                + text
+            )
         is_root = (fid == "root")
 
         await _msg(update).reply_text(
@@ -374,8 +372,18 @@ async def cmd_cd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             )
         )
         return
-
-    nav.push_folder(uid, item.id, item.name)
+    if item.is_shortcut:
+        if not item.shortcut_target_id:
+            await _msg(update).reply_text(
+                formatter.error(
+                    "Shortcut target is unavailable.",
+                    "Try opening the item directly in Google Drive.",
+                )
+            )
+            return
+        nav.push_folder(uid, item.shortcut_target_id, item.name)
+    else:
+        nav.push_folder(uid, item.id, item.name)
     # Show contents of the new directory
     await cmd_info(update, context)
 
@@ -733,7 +741,18 @@ async def cmd_move(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 )
             )
             return
-        ds.move_file(uid, file_item.id, dest_item.id)
+        dest_id = dest_item.id
+        if dest_item.is_shortcut:
+            if not dest_item.shortcut_target_id:
+                await _msg(update).reply_text(
+                    formatter.error(
+                        "Shortcut target is unavailable.",
+                        "Try selecting a different destination folder.",
+                    )
+                )
+                return
+            dest_id = dest_item.shortcut_target_id
+        ds.move_file(uid, file_item.id, dest_id)
         await _msg(update).reply_text(
             formatter.success("Moved", file_item.name, dest_item.name),
             reply_markup=ui.back_to_menu_keyboard(),
@@ -767,7 +786,7 @@ async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                     )
                 )
                 return
-            if item.is_folder:
+            if item.is_folder and not item.is_shortcut:
                 await _msg(update).reply_text(
                     formatter.error(
                         f"[{target}] is a folder.",

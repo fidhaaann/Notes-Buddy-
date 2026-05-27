@@ -130,7 +130,7 @@ Notes-Buddy/
 - [x] Terminal-style navigation with hierarchical indexing
 - [x] Professional UX redesign
 - [x] Security audit & hardening (PKCE, audit logging, token revocation)
-- [ ] Shared Drive support
+- [x] Shared Drive support
 - [ ] Natural language search
 - [ ] Multi-account switching
 - [ ] Chunked streaming for large uploads

@@ -28,6 +28,9 @@ class IndexedItem:
     is_folder: bool
     parent_index: str          # e.g. "1" for a child of folder [1]
     full_index: str            # e.g. "1.2"
+    is_shortcut: bool = False
+    shortcut_target_id: Optional[str] = None
+    shortcut_target_mime_type: Optional[str] = None
     path: str = ""             # full Drive path string
 
 
@@ -135,6 +138,9 @@ def build_index_map(uid: int, folders: list[dict], files: list[dict]) -> dict[st
             name=f["name"],
             mime_type=f.get("mimeType", FOLDER_MIME),
             is_folder=True,
+            is_shortcut=bool(f.get("isShortcut")),
+            shortcut_target_id=f.get("shortcutTargetId"),
+            shortcut_target_mime_type=f.get("shortcutTargetMimeType"),
             parent_index="",
             full_index=idx,
             path=path,
@@ -150,6 +156,9 @@ def build_index_map(uid: int, folders: list[dict], files: list[dict]) -> dict[st
             name=f["name"],
             mime_type=f.get("mimeType", ""),
             is_folder=False,
+            is_shortcut=bool(f.get("isShortcut")),
+            shortcut_target_id=f.get("shortcutTargetId"),
+            shortcut_target_mime_type=f.get("shortcutTargetMimeType"),
             parent_index="",
             full_index=idx,
             path=path,
@@ -192,6 +201,9 @@ def build_deep_index_map(
             name=f["name"],
             mime_type=f.get("mimeType", FOLDER_MIME),
             is_folder=True,
+            is_shortcut=bool(f.get("isShortcut")),
+            shortcut_target_id=f.get("shortcutTargetId"),
+            shortcut_target_mime_type=f.get("shortcutTargetMimeType"),
             parent_index="",
             full_index=parent_idx,
             path=path,
@@ -210,6 +222,9 @@ def build_deep_index_map(
                     name=sf["name"],
                     mime_type=sf.get("mimeType", FOLDER_MIME),
                     is_folder=True,
+                    is_shortcut=bool(sf.get("isShortcut")),
+                    shortcut_target_id=sf.get("shortcutTargetId"),
+                    shortcut_target_mime_type=sf.get("shortcutTargetMimeType"),
                     parent_index=parent_idx,
                     full_index=child_idx,
                     path=f"{path} > {f['name']}",
@@ -222,6 +237,9 @@ def build_deep_index_map(
                     name=sf["name"],
                     mime_type=sf.get("mimeType", ""),
                     is_folder=False,
+                    is_shortcut=bool(sf.get("isShortcut")),
+                    shortcut_target_id=sf.get("shortcutTargetId"),
+                    shortcut_target_mime_type=sf.get("shortcutTargetMimeType"),
                     parent_index=parent_idx,
                     full_index=child_idx,
                     path=f"{path} > {f['name']}",
@@ -237,6 +255,9 @@ def build_deep_index_map(
             name=f["name"],
             mime_type=f.get("mimeType", ""),
             is_folder=False,
+            is_shortcut=bool(f.get("isShortcut")),
+            shortcut_target_id=f.get("shortcutTargetId"),
+            shortcut_target_mime_type=f.get("shortcutTargetMimeType"),
             parent_index="",
             full_index=idx,
             path=path,

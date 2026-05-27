@@ -21,6 +21,7 @@ def _file_icon(mime_type: str) -> str:
     if not mime_type:
         return "○"
     m = mime_type.lower()
+    if "shortcut" in m:                                     return "↪"
     if "folder" in m:                                       return "▸"
     if m.startswith("image/"):                              return "◈"
     if m.startswith("video/"):                              return "▶"
@@ -41,6 +42,7 @@ def _file_type_label(mime_type: str) -> str:
     if not mime_type:
         return "Unknown"
     m = mime_type.lower()
+    if "shortcut" in m:            return "Shortcut"
     if "folder" in m:               return "Folder"
     if "pdf" in m:                  return "PDF"
     if "png" in m:                  return "PNG Image"
@@ -196,7 +198,7 @@ def directory_listing(
         lines.append("📂 Directories")
         lines.append("")
         for idx, item in folder_items:
-            icon = "▸"
+            icon = _file_icon(item.mime_type)
             lines.append(f"  [{idx}]  {icon} {item.name}")
             # Show children if expanded
             if idx in child_items:
@@ -218,6 +220,20 @@ def directory_listing(
     lines.append("  /more <n>  info  /delete <n>")
     lines.append("  /cd  go back")
 
+    return "\n".join(lines)
+
+
+def partial_browse_warning(error_count: int, truncated: bool, used_fallback: bool) -> str:
+    lines = [
+        "❌ Unable to Fully Load Drive Structure",
+        "",
+        "Some folders or files could not be accessed safely.",
+        "Accessible items have been loaded successfully.",
+    ]
+    if used_fallback:
+        lines.extend(["", "Using simplified listing mode for stability."])
+    if truncated:
+        lines.extend(["", "Some large folders were truncated to keep browsing stable."])
     return "\n".join(lines)
 
 
