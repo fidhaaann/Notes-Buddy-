@@ -112,14 +112,12 @@ def clear_user(uid: int) -> None:
 
 # ── Hierarchical index map ────────────────────────────────────────────────────
 
-def build_index_map(uid: int, folders: list[dict], files: list[dict]) -> dict[str, IndexedItem]:
+def build_flat_index_map(uid: int, folders: list[dict], files: list[dict]) -> dict[str, IndexedItem]:
     """
     Build a flat index map from the current folder listing.
 
     Folders are numbered 1, 2, 3, ...
-    Files under each folder (if expanded) would be 1.1, 1.2, ...
-    For a flat listing (current dir), folders get top-level indices,
-    and files continue the numbering.
+    Files continue the numbering.
 
     Returns the map and also caches it on the user session.
     """
@@ -168,103 +166,9 @@ def build_index_map(uid: int, folders: list[dict], files: list[dict]) -> dict[st
     return s.index_map
 
 
-def build_deep_index_map(
-    uid: int,
-    folders: list[dict],
-    files: list[dict],
-    children_map: dict[str, tuple[list[dict], list[dict]]],
-) -> dict[str, IndexedItem]:
-    """
-    Build a hierarchical index map with sub-indices.
-
-    folders/files: top-level items in the current directory.
-    children_map: folder_id → (sub_folders, sub_files) for one level of expansion.
-
-    Produces indices like:
-      [1] FolderA
-        [1.1] sub_file.pdf
-        [1.2] sub_file2.pdf
-      [2] FolderB
-        [2.1] child.docx
-      [3] standalone_file.txt
-    """
-    s = _get(uid)
-    s.index_map.clear()
-    path = breadcrumb(uid)
-
-    folder_counter = 0
-    for f in folders:
-        folder_counter += 1
-        parent_idx = str(folder_counter)
-        item = IndexedItem(
-            id=f["id"],
-            name=f["name"],
-            mime_type=f.get("mimeType", FOLDER_MIME),
-            is_folder=True,
-            is_shortcut=bool(f.get("isShortcut")),
-            shortcut_target_id=f.get("shortcutTargetId"),
-            shortcut_target_mime_type=f.get("shortcutTargetMimeType"),
-            parent_index="",
-            full_index=parent_idx,
-            path=path,
-        )
-        s.index_map[parent_idx] = item
-
-        # Expand children if available
-        if f["id"] in children_map:
-            sub_folders, sub_files = children_map[f["id"]]
-            child_counter = 0
-            for sf in sub_folders:
-                child_counter += 1
-                child_idx = f"{parent_idx}.{child_counter}"
-                s.index_map[child_idx] = IndexedItem(
-                    id=sf["id"],
-                    name=sf["name"],
-                    mime_type=sf.get("mimeType", FOLDER_MIME),
-                    is_folder=True,
-                    is_shortcut=bool(sf.get("isShortcut")),
-                    shortcut_target_id=sf.get("shortcutTargetId"),
-                    shortcut_target_mime_type=sf.get("shortcutTargetMimeType"),
-                    parent_index=parent_idx,
-                    full_index=child_idx,
-                    path=f"{path} > {f['name']}",
-                )
-            for sf in sub_files:
-                child_counter += 1
-                child_idx = f"{parent_idx}.{child_counter}"
-                s.index_map[child_idx] = IndexedItem(
-                    id=sf["id"],
-                    name=sf["name"],
-                    mime_type=sf.get("mimeType", ""),
-                    is_folder=False,
-                    is_shortcut=bool(sf.get("isShortcut")),
-                    shortcut_target_id=sf.get("shortcutTargetId"),
-                    shortcut_target_mime_type=sf.get("shortcutTargetMimeType"),
-                    parent_index=parent_idx,
-                    full_index=child_idx,
-                    path=f"{path} > {f['name']}",
-                )
-
-    # Top-level files (after folders)
-    file_counter = 0
-    for f in files:
-        file_counter += 1
-        idx = str(folder_counter + file_counter)
-        s.index_map[idx] = IndexedItem(
-            id=f["id"],
-            name=f["name"],
-            mime_type=f.get("mimeType", ""),
-            is_folder=False,
-            is_shortcut=bool(f.get("isShortcut")),
-            shortcut_target_id=f.get("shortcutTargetId"),
-            shortcut_target_mime_type=f.get("shortcutTargetMimeType"),
-            parent_index="",
-            full_index=idx,
-            path=path,
-        )
-
-    return s.index_map
-
+def build_index_map(uid: int, folders: list[dict], files: list[dict]) -> dict[str, IndexedItem]:
+    """Alias for backward compatibility."""
+    return build_flat_index_map(uid, folders, files)
 
 def resolve_index(uid: int, index: str) -> Optional[IndexedItem]:
     """Look up a cached item by its hierarchical index string."""

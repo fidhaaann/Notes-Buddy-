@@ -32,7 +32,6 @@ _SHARED_DRIVE_PREFIX = "drive:"
 
 _LIST_PAGE_SIZE = 200
 _MAX_ITEMS_PER_FOLDER = 2000
-_MAX_EXPANDED_FOLDERS = 30
 
 _LIST_FIELDS = (
     "nextPageToken, files(id, name, mimeType, parents, shortcutDetails, size, driveId)"
@@ -41,12 +40,11 @@ _LIST_FIELDS = (
 
 @dataclass
 class DirectoryListing:
+    """Result of loading a single folder (lazy loading)."""
     folders: list[dict] = field(default_factory=list)
     files: list[dict] = field(default_factory=list)
-    children_map: dict[str, tuple[list[dict], list[dict]]] = field(default_factory=dict)
     error_count: int = 0
     truncated: bool = False
-    used_fallback: bool = False
 
 # Max filename length for sanitization
 _MAX_FILENAME_LENGTH = 200
@@ -357,9 +355,16 @@ def list_files(telegram_id: int, parent_id: str = "root") -> list[dict]:
 def list_directory(
     telegram_id: int,
     parent_id: str = "root",
-    expand_children: bool = True,
-    depth_limit: int = 1,
 ) -> DirectoryListing:
+    """
+    Lazy-load a single folder (no child expansion).
+    
+    This is the core of incremental folder loading:
+    - Load ONLY current folder contents
+    - Do NOT recursively expand children
+    - Failures isolated to this folder only
+    - User navigates on-demand with /cd
+    """
     svc = _service(telegram_id)
     listing = DirectoryListing()
     parent_ref, extra = _resolve_parent_ref(parent_id)
@@ -380,95 +385,32 @@ def list_directory(
     listing.error_count += errors
 
     if parent_id == "root":
-        shared = _list_shared_drives(svc, telegram_id)
-        for drive in shared:
-            drive_id = drive.get("id")
-            if not drive_id:
-                continue
-            listing.folders.append(
-                {
-                    "id": _shared_drive_ref(drive_id),
-                    "name": drive.get("name") or "Shared Drive",
-                    "mimeType": FOLDER_MIME,
-                    "isShortcut": False,
-                    "isSharedDrive": True,
-                    "shortcutTargetId": None,
-                    "shortcutTargetMimeType": None,
-                }
-            )
-
-    if expand_children and depth_limit > 0 and listing.folders:
         try:
-            children_map, child_errors, child_truncated, used_fallback = _expand_children_map(
-                svc,
+            shared = _list_shared_drives(svc, telegram_id)
+            for drive in shared:
+                drive_id = drive.get("id")
+                if not drive_id:
+                    continue
+                listing.folders.append(
+                    {
+                        "id": _shared_drive_ref(drive_id),
+                        "name": drive.get("name") or "Shared Drive",
+                        "mimeType": FOLDER_MIME,
+                        "isShortcut": False,
+                        "isSharedDrive": True,
+                        "shortcutTargetId": None,
+                        "shortcutTargetMimeType": None,
+                    }
+                )
+        except Exception as exc:
+            logger.warning(
+                "shared_drives_list_failed user=%s error=%s",
                 telegram_id,
-                listing.folders,
-                depth_limit=depth_limit,
-            )
-            listing.children_map = children_map
-            listing.error_count += child_errors
-            listing.truncated = listing.truncated or child_truncated
-            listing.used_fallback = listing.used_fallback or used_fallback
-        except Exception:
-            listing.used_fallback = True
-            listing.children_map = {}
-            logger.exception(
-                "drive_traversal_fallback user=%s folder=%s depth=%s",
-                telegram_id,
-                parent_id,
-                depth_limit,
+                exc,
             )
 
     return listing
 
-
-def _expand_children_map(
-    svc: Any,
-    telegram_id: int,
-    folders: list[dict],
-    depth_limit: int,
-) -> tuple[dict[str, tuple[list[dict], list[dict]]], int, bool, bool]:
-    children_map: dict[str, tuple[list[dict], list[dict]]] = {}
-    errors = 0
-    truncated = False
-    used_fallback = False
-    visited: set[str] = set()
-
-    if len(folders) > _MAX_EXPANDED_FOLDERS:
-        used_fallback = True
-    for f in folders[:_MAX_EXPANDED_FOLDERS]:
-        if f.get("isShortcut") or f.get("isSharedDrive"):
-            continue
-        folder_id = f.get("id")
-        if not folder_id or folder_id in visited:
-            continue
-        visited.add(folder_id)
-        try:
-            q = f"'{folder_id}' in parents and trashed=false"
-            items, was_truncated = _list_files_paginated(
-                svc,
-                telegram_id,
-                folder_id,
-                q,
-                fields=_LIST_FIELDS,
-            )
-            sub_folders, sub_files, sub_errors = _split_items(items, telegram_id, folder_id, 1)
-            errors += sub_errors
-            truncated = truncated or was_truncated
-            if sub_folders or sub_files:
-                children_map[folder_id] = (sub_folders, sub_files)
-        except Exception as exc:
-            errors += 1
-            logger.warning(
-                "drive_traversal_child_error user=%s folder=%s depth=%s mime=%s error=%s",
-                telegram_id,
-                folder_id,
-                depth_limit,
-                FOLDER_MIME,
-                exc,
-            )
-            continue
-    return children_map, errors, truncated, used_fallback
 
 def search_files(telegram_id: int, keyword: str) -> list[dict]:
     svc = _service(telegram_id)

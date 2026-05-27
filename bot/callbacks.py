@@ -138,14 +138,14 @@ async def _send_browse(uid: int, query, update) -> None:
         path = nav.breadcrumb(uid)
 
         try:
-            listing = ds.list_directory(uid, parent_id=fid, expand_children=True, depth_limit=1)
+            listing = ds.list_directory(uid, parent_id=fid)
         except HttpError as e:
             status = getattr(e, "resp", None)
             if status and status.status in (400, 404, 410):
                 nav.go_home(uid)
                 fid = nav.current_folder_id(uid)
                 path = nav.breadcrumb(uid)
-                listing = ds.list_directory(uid, parent_id=fid, expand_children=True, depth_limit=1)
+                listing = ds.list_directory(uid, parent_id=fid)
             elif status and status.status in (401, 403):
                 raise PermissionError("User not authenticated.") from e
             else:
@@ -153,14 +153,13 @@ async def _send_browse(uid: int, query, update) -> None:
 
         folders = listing.folders
         files = listing.files
-        children_map = listing.children_map
 
-        index_map = nav.build_deep_index_map(uid, folders, files, children_map)
+        index_map = nav.build_flat_index_map(uid, folders, files)
         text = formatter.directory_listing(path, index_map, folders, files)
-        if listing.error_count or listing.truncated or listing.used_fallback:
+        if listing.error_count or listing.truncated:
             text = (
                 formatter.partial_browse_warning(
-                    listing.error_count, listing.truncated, listing.used_fallback
+                    listing.error_count, listing.truncated, False
                 )
                 + "\n\n"
                 + text

@@ -223,15 +223,13 @@ def directory_listing(
     return "\n".join(lines)
 
 
-def partial_browse_warning(error_count: int, truncated: bool, used_fallback: bool) -> str:
+def partial_browse_warning(error_count: int, truncated: bool, used_fallback: bool = False) -> str:
     lines = [
         "❌ Unable to Fully Load Drive Structure",
         "",
         "Some folders or files could not be accessed safely.",
         "Accessible items have been loaded successfully.",
     ]
-    if used_fallback:
-        lines.extend(["", "Using simplified listing mode for stability."])
     if truncated:
         lines.extend(["", "Some large folders were truncated to keep browsing stable."])
     return "\n".join(lines)
