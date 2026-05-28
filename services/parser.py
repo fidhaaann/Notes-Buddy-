@@ -15,6 +15,16 @@ def parse_args(text: str, command: str) -> list[str]:
     return stripped.split() if stripped else []
 
 
+def parse_command_text(text: str) -> list[str]:
+    """Split a command text into arguments without requiring a command name."""
+    if not text:
+        return []
+    parts = text.strip().split(maxsplit=1)
+    if len(parts) < 2:
+        return []
+    return parts[1].split()
+
+
 def human_size(size_bytes: int) -> str:
     for unit in ("B", "KB", "MB", "GB"):
         if size_bytes < 1024:
