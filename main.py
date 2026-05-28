@@ -18,6 +18,8 @@ import json
 import logging
 import os
 import re
+import time
+import uuid
 
 from dotenv import load_dotenv
 load_dotenv()   # ← loads .env before anything reads env vars
@@ -30,36 +32,17 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from telegram.ext import Application
 
 from db.models import init_db, cleanup_expired_states
+from db import models
 from bot.handlers import register_handlers
+from bot import nav
 from drive.auth import exchange_code
+from monitoring import logging as logging_config
+from monitoring import context as monitoring_context
+from security import limits
+from storage import sandbox
+from tasks.manager import TaskManager
 
-# ── Logging ───────────────────────────────────────────────────────────────────
-
-
-class _SensitiveDataFilter(logging.Filter):
-    """Redact potential tokens, keys, and credentials from log output."""
-    _patterns = [
-        # OAuth tokens (long base64-like strings)
-        re.compile(r'ya29\.[A-Za-z0-9_-]{20,}'),
-        # Generic long secrets (40+ chars)
-        re.compile(r'(?<=["\s=:])[A-Za-z0-9_/+-]{40,}'),
-        # Fernet tokens
-        re.compile(r'gAAAAA[A-Za-z0-9_/+-]{20,}'),
-    ]
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        if isinstance(record.msg, str):
-            for pattern in self._patterns:
-                record.msg = pattern.sub('[REDACTED]', record.msg)
-        return True
-
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
-)
-# Apply sensitive data filter to root logger
-logging.getLogger().addFilter(_SensitiveDataFilter())
+logging_config.configure_logging()
 logger = logging.getLogger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -98,6 +81,33 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         return response
 
 
+class RequestLoggingMiddleware(BaseHTTPMiddleware):
+    """Attach request context and log timing for HTTP endpoints."""
+
+    async def dispatch(self, request, call_next):
+        request_id = request.headers.get("X-Request-ID") or uuid.uuid4().hex
+        monitoring_context.set_request_context(
+            request_id=request_id,
+            operation=f"http:{request.url.path}",
+        )
+        start = time.monotonic()
+        response = None
+        try:
+            response = await call_next(request)
+            return response
+        finally:
+            duration_ms = int((time.monotonic() - start) * 1000)
+            status = getattr(response, "status_code", "error")
+            logger.info(
+                "http_request method=%s path=%s status=%s duration_ms=%s",
+                request.method,
+                request.url.path,
+                status,
+                duration_ms,
+            )
+            monitoring_context.clear_request_context()
+
+
 # ── FastAPI app ───────────────────────────────────────────────────────────────
 web_app = FastAPI(
     title="Drive Bot OAuth Server",
@@ -106,6 +116,16 @@ web_app = FastAPI(
     openapi_url=None,
 )
 web_app.add_middleware(SecurityHeadersMiddleware)
+web_app.add_middleware(RequestLoggingMiddleware)
+
+
+@web_app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    logger.exception("unhandled_api_error")
+    return HTMLResponse(
+        "<h2>❌ Server Error</h2><p>Please retry or contact support.</p>",
+        status_code=500,
+    )
 
 
 # ── Username validation ───────────────────────────────────────────────────────
@@ -245,6 +265,8 @@ async def main() -> None:
 
     # Build & start bot
     _bot_app = build_bot()
+    task_manager = TaskManager(_bot_app.bot, worker_count=limits.TASK_WORKERS)
+    _bot_app.bot_data["task_manager"] = task_manager
     await _bot_app.initialize()
     await _bot_app.start()
     assert _bot_app.updater is not None, "Bot updater failed to initialise"
@@ -261,10 +283,15 @@ async def main() -> None:
             await asyncio.sleep(1800)  # 30 minutes
             try:
                 cleanup_expired_states()
+                models.cleanup_task_jobs(limits.TASK_TTL_SECONDS)
+                models.cleanup_anomaly_tracking()
+                sandbox.cleanup_expired_sandboxes(limits.TASK_TTL_SECONDS)
+                nav.cleanup_expired_sessions()
                 logger.debug("Periodic OAuth state cleanup completed.")
             except Exception:
                 logger.warning("Periodic state cleanup failed.")
 
+    await task_manager.start()
     asyncio.create_task(_periodic_cleanup())
 
     # Start FastAPI (OAuth server)
@@ -277,6 +304,7 @@ async def main() -> None:
     logger.info("Shutting down...")
     assert _bot_app.updater is not None
     await _bot_app.updater.stop()
+    await task_manager.stop()
     await _bot_app.stop()
     await _bot_app.shutdown()
     logger.info("Shutdown complete.")
