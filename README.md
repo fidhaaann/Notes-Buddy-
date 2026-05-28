@@ -75,6 +75,10 @@ Notes-Buddy/
 ├── services/
 │   ├── zip_service.py   # In-memory archive creation
 │   └── parser.py        # Input processing helpers
+├── security/            # Validation, limits, rate-limiting, upload checks
+├── storage/             # Per-user temp sandboxes
+├── tasks/               # Background job queue (downloads/ZIPs)
+├── monitoring/          # Structured logging + error handling
 ├── db/
 │   └── models.py        # SQLite schema, encryption, CRUD, audit log
 ├── templates/
@@ -118,6 +122,7 @@ Notes-Buddy/
 
 1. **Clone:** `git clone https://github.com/fidhaaann/Notes-Buddy-`
 2. **Install:** `pip install -r requirements.txt`
+   **Security tools (dev/CI):** `pip install -r requirements-dev.txt`
 3. **Credentials:** Place `credentials.json` from Google Cloud Console in the root (or set `GOOGLE_CLIENT_ID` + `GOOGLE_CLIENT_SECRET` env vars)
 4. **Environment:** Create `.env` from `.env.example` — set `TELEGRAM_BOT_TOKEN`, `OAUTH_REDIRECT_URI`, and `TOKEN_ENCRYPTION_KEY`
 5. **Run:** `python main.py`
