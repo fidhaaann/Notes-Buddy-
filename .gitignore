@@ -34,3 +34,4 @@ Thumbs.db
 # Logs
 *.log
 implementation.md
+temp/
