@@ -8,11 +8,11 @@ Security:
   - Filename sanitization on uploads and downloads
 """
 
+import asyncio
 import io
 import logging
 import mimetypes
-import os
-import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -23,6 +23,7 @@ from google.oauth2.credentials import Credentials
 
 from drive.auth import get_credentials
 from db.models import log_file, log_audit
+from security import limits, validators
 
 logger = logging.getLogger(__name__)
 
@@ -46,54 +47,28 @@ class DirectoryListing:
     error_count: int = 0
     truncated: bool = False
 
-# Max filename length for sanitization
-_MAX_FILENAME_LENGTH = 200
-
-
 def _sanitize_query_value(value: str) -> str:
-    """Escape special characters for Google Drive API query strings.
-
-    Prevents query injection by escaping backslashes and single quotes
-    in user-supplied values before embedding them in query filters.
-    """
-    value = value.replace("\\", "\\\\").replace("'", "\\'")
-    # V-NEW-05: Strip newlines/carriage returns that could cause unexpected parsing
-    value = value.replace("\n", " ").replace("\r", " ")
-    return value
+    """Escape special characters for Google Drive API query strings."""
+    return validators.sanitize_query_value(value)
 
 
 def _sanitize_filename(filename: str) -> str:
-    """Sanitize a filename for safe use.
+    """Sanitize a filename for safe use."""
+    return validators.sanitize_filename(filename)
 
-    Removes:
-      - Path separators (directory traversal)
-      - Null bytes
-      - Control characters
-      - Leading/trailing whitespace and dots
 
-    Truncates to _MAX_FILENAME_LENGTH characters.
-    """
-    if not filename:
-        return "unnamed_file"
-
-    # Remove null bytes
-    filename = filename.replace("\x00", "")
-
-    # Strip path — take only the basename
-    filename = os.path.basename(filename)
-
-    # Remove control characters (0x00-0x1F, 0x7F)
-    filename = re.sub(r'[\x00-\x1f\x7f]', '', filename)
-
-    # Strip leading/trailing dots and whitespace (prevents hidden files, path tricks)
-    filename = filename.strip(". \t\n\r")
-
-    # Truncate
-    if len(filename) > _MAX_FILENAME_LENGTH:
-        name, ext = os.path.splitext(filename)
-        filename = name[:_MAX_FILENAME_LENGTH - len(ext)] + ext
-
-    return filename or "unnamed_file"
+def _execute_with_retry(request, retries: int = 3, base_backoff: float = 0.5):
+    """Execute a Google API request with safe retries for transient errors."""
+    for attempt in range(retries):
+        try:
+            return request.execute()
+        except HttpError as e:
+            status = getattr(e, "resp", None)
+            code = getattr(status, "status", None)
+            if code in (429, 500, 502, 503, 504) and attempt < retries - 1:
+                time.sleep(base_backoff * (2 ** attempt))
+                continue
+            raise
 
 
 def _service(telegram_id: int) -> Any:
@@ -126,6 +101,8 @@ def _shared_drive_ref(drive_id: str) -> str:
 
 def _resolve_parent_ref(parent_id: str) -> tuple[str, dict[str, str]]:
     """Resolve a folder reference into a parent ID and list parameters."""
+    if not validators.validate_drive_id(parent_id, allow_root=True):
+        raise ValueError("Invalid folder reference.")
     if _is_shared_drive_ref(parent_id):
         drive_id = parent_id[len(_SHARED_DRIVE_PREFIX):]
         return drive_id, {"driveId": drive_id, "corpora": "drive"}
@@ -134,6 +111,8 @@ def _resolve_parent_ref(parent_id: str) -> tuple[str, dict[str, str]]:
 
 def _resolve_parent_for_write(parent_id: str) -> str:
     """Resolve a folder reference into a concrete parent ID for write ops."""
+    if not validators.validate_drive_id(parent_id, allow_root=True):
+        raise ValueError("Invalid folder reference.")
     if _is_shared_drive_ref(parent_id):
         return parent_id[len(_SHARED_DRIVE_PREFIX):]
     return parent_id
@@ -155,7 +134,7 @@ def _list_files_paginated(
     extra_params = extra_params or {}
     while True:
         try:
-            result = svc.files().list(
+            request = svc.files().list(
                 q=q,
                 fields=fields,
                 pageSize=page_size,
@@ -163,7 +142,8 @@ def _list_files_paginated(
                 supportsAllDrives=True,
                 includeItemsFromAllDrives=True,
                 **extra_params,
-            ).execute()
+            )
+            result = _execute_with_retry(request)
         except HttpError as e:
             status = getattr(e, "resp", None)
             logger.warning(
@@ -199,11 +179,12 @@ def _list_shared_drives(svc: Any, telegram_id: int) -> list[dict]:
     page_token: Optional[str] = None
     while True:
         try:
-            result = svc.drives().list(
+            request = svc.drives().list(
                 pageSize=100,
                 pageToken=page_token,
                 fields="nextPageToken, drives(id, name)",
-            ).execute()
+            )
+            result = _execute_with_retry(request)
         except HttpError:
             logger.warning(
                 "shared_drive_list_failed user=%s; continuing without drives.",
@@ -318,14 +299,15 @@ def open_folder(telegram_id: int, folder_name: str, parent_id: Optional[str] = N
         q = f"'{parent_ref}' in parents and " + q
     else:
         extra = {}
-    result = svc.files().list(
+    request = svc.files().list(
         q=q,
         fields="files(id, name)",
         pageSize=1,
         supportsAllDrives=True,
         includeItemsFromAllDrives=True,
         **extra,
-    ).execute()
+    )
+    result = _execute_with_retry(request)
     files = result.get("files", [])
     return files[0] if files else None
 
@@ -436,38 +418,46 @@ def search_files(telegram_id: int, keyword: str) -> list[dict]:
 
 def get_recent_files(telegram_id: int, limit: int = 10) -> list[dict]:
     svc = _service(telegram_id)
-    result = svc.files().list(
+    request = svc.files().list(
         orderBy="viewedByMeTime desc",
         pageSize=limit,
         fields="files(id, name, mimeType, shortcutDetails)",
         q="trashed=false",
         supportsAllDrives=True,
         includeItemsFromAllDrives=True,
-    ).execute()
+    )
+    result = _execute_with_retry(request)
     return result.get("files", [])
 
 
 def get_file_metadata(telegram_id: int, file_id: str) -> dict:
     svc = _service(telegram_id)
-    return svc.files().get(
+    if not validators.validate_drive_id(file_id, allow_root=False):
+        raise ValueError("Invalid file reference.")
+    request = svc.files().get(
         fileId=file_id,
         fields="id, name, mimeType, size, createdTime, modifiedTime, parents, webViewLink, webContentLink, shortcutDetails",
         supportsAllDrives=True,
-    ).execute()
+    )
+    return _execute_with_retry(request)
 
 
 def move_file(telegram_id: int, file_id: str, new_parent_id: str) -> dict:
     svc = _service(telegram_id)
-    file = svc.files().get(fileId=file_id, fields="parents", supportsAllDrives=True).execute()
+    if not validators.validate_drive_id(file_id, allow_root=False):
+        raise ValueError("Invalid file reference.")
+    request = svc.files().get(fileId=file_id, fields="parents", supportsAllDrives=True)
+    file = _execute_with_retry(request)
     previous_parents = ",".join(file.get("parents", []))
     parent_ref = _resolve_parent_for_write(new_parent_id)
-    result = svc.files().update(
+    request = svc.files().update(
         fileId=file_id,
         addParents=parent_ref,
         removeParents=previous_parents,
         fields="id, parents",
         supportsAllDrives=True,
-    ).execute()
+    )
+    result = _execute_with_retry(request)
     log_audit(telegram_id, "move", file_id, f"to parent={new_parent_id}")
     return result
 
@@ -476,16 +466,19 @@ def create_folder(telegram_id: int, name: str, parent_id: str = "root") -> dict:
     svc = _service(telegram_id)
     safe_name = _sanitize_filename(name)
     parent_ref = _resolve_parent_for_write(parent_id)
+    if not safe_name:
+        raise ValueError("Folder name cannot be empty.")
     file_metadata = {
         "name": safe_name,
         "mimeType": FOLDER_MIME,
         "parents": [parent_ref]
     }
-    return svc.files().create(
+    request = svc.files().create(
         body=file_metadata,
         fields="id, name",
         supportsAllDrives=True,
-    ).execute()
+    )
+    return _execute_with_retry(request)
 
 
 def upload_file(
@@ -495,6 +488,8 @@ def upload_file(
     parent_id: str = "root",
 ) -> dict:
     svc = _service(telegram_id)
+    if not file_bytes:
+        raise ValueError("Empty upload payload.")
 
     # Sanitize filename before upload
     safe_filename = _sanitize_filename(filename)
@@ -508,8 +503,8 @@ def upload_file(
     uploaded = (
         svc.files()
         .create(body=file_metadata, media_body=media, fields="id, name, mimeType", supportsAllDrives=True)
-        .execute()
     )
+    uploaded = _execute_with_retry(uploaded)
     log_file(uploaded["id"], uploaded["name"], uploaded.get("mimeType"))
     return uploaded
 
@@ -526,7 +521,7 @@ _GOOGLE_EXPORT_MAP: dict[str, tuple[str, str]] = {
 }
 
 # Max download size — matches Telegram bot API limit (45 MB safe margin)
-MAX_DOWNLOAD_BYTES = 45 * 1024 * 1024
+MAX_DOWNLOAD_BYTES = limits.MAX_TELEGRAM_DOWNLOAD_BYTES
 
 
 def download_file(telegram_id: int, file_id: str) -> tuple[bytes, str]:
@@ -538,11 +533,14 @@ def download_file(telegram_id: int, file_id: str) -> tuple[bytes, str]:
     Raises ValueError if the download exceeds MAX_DOWNLOAD_BYTES.
     """
     svc  = _service(telegram_id)
-    meta = svc.files().get(
+    if not validators.validate_drive_id(file_id, allow_root=False):
+        raise ValueError("Invalid file reference.")
+    request = svc.files().get(
         fileId=file_id,
         fields="name, mimeType, shortcutDetails",
         supportsAllDrives=True,
-    ).execute()
+    )
+    meta = _execute_with_retry(request)
     filename  = _sanitize_filename(meta["name"])
     mime_type = meta.get("mimeType", "")
 
@@ -577,20 +575,26 @@ def download_file(telegram_id: int, file_id: str) -> tuple[bytes, str]:
 
 def rename_file(telegram_id: int, file_id: str, new_name: str) -> dict:
     svc = _service(telegram_id)
+    if not validators.validate_drive_id(file_id, allow_root=False):
+        raise ValueError("Invalid file reference.")
     safe_name = _sanitize_filename(new_name)
-    result = svc.files().update(
+    request = svc.files().update(
         fileId=file_id,
         body={"name": safe_name},
         fields="id, name",
         supportsAllDrives=True,
-    ).execute()
+    )
+    result = _execute_with_retry(request)
     log_audit(telegram_id, "rename", file_id, f"new_name={safe_name}")
     return result
 
 
 def delete_file(telegram_id: int, file_id: str) -> None:
     svc = _service(telegram_id)
-    svc.files().delete(fileId=file_id, supportsAllDrives=True).execute()
+    if not validators.validate_drive_id(file_id, allow_root=False):
+        raise ValueError("Invalid file reference.")
+    request = svc.files().delete(fileId=file_id, supportsAllDrives=True)
+    _execute_with_retry(request)
     log_audit(telegram_id, "delete", file_id)
 
 
@@ -599,12 +603,47 @@ def find_file_by_name(telegram_id: int, name: str) -> Optional[dict]:
     svc = _service(telegram_id)
     safe_name = _sanitize_query_value(name)
     q = f"name='{safe_name}' and mimeType!='{FOLDER_MIME}' and trashed=false"
-    result = svc.files().list(
+    request = svc.files().list(
         q=q,
         fields="files(id, name, mimeType)",
         pageSize=1,
         supportsAllDrives=True,
         includeItemsFromAllDrives=True,
-    ).execute()
+    )
+    result = _execute_with_retry(request)
     files = result.get("files", [])
     return files[0] if files else None
+
+
+# ── Async wrappers (offload sync Google API calls) ─────────────────────────────
+
+async def list_directory_async(telegram_id: int, parent_id: str = "root") -> DirectoryListing:
+    return await asyncio.to_thread(list_directory, telegram_id, parent_id)
+
+
+async def search_files_async(telegram_id: int, keyword: str) -> list[dict]:
+    return await asyncio.to_thread(search_files, telegram_id, keyword)
+
+
+async def get_file_metadata_async(telegram_id: int, file_id: str) -> dict:
+    return await asyncio.to_thread(get_file_metadata, telegram_id, file_id)
+
+
+async def upload_file_async(telegram_id: int, file_bytes: bytes, filename: str, parent_id: str = "root") -> dict:
+    return await asyncio.to_thread(upload_file, telegram_id, file_bytes, filename, parent_id)
+
+
+async def create_folder_async(telegram_id: int, name: str, parent_id: str = "root") -> dict:
+    return await asyncio.to_thread(create_folder, telegram_id, name, parent_id)
+
+
+async def rename_file_async(telegram_id: int, file_id: str, new_name: str) -> dict:
+    return await asyncio.to_thread(rename_file, telegram_id, file_id, new_name)
+
+
+async def move_file_async(telegram_id: int, file_id: str, new_parent_id: str) -> dict:
+    return await asyncio.to_thread(move_file, telegram_id, file_id, new_parent_id)
+
+
+async def delete_file_async(telegram_id: int, file_id: str) -> None:
+    await asyncio.to_thread(delete_file, telegram_id, file_id)

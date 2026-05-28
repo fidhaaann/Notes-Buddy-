@@ -16,10 +16,8 @@ Security:
   - Authentication checks on all file operations
 """
 
-import io
 import asyncio
 import logging
-import re
 
 from telegram import Update
 from telegram.ext import ContextTypes
@@ -31,16 +29,21 @@ from db import models
 from services.parser import human_size
 from services import anomaly_detection
 from services import stepup_auth
+from security import limits, validators, uploads
+from security.rate_limit import get_rate_limiter
+from tasks.manager import get_task_manager
+from storage import sandbox
+from monitoring import context as monitoring_context
+from monitoring import timing
 
 logger = logging.getLogger(__name__)
+_RATE_LIMITER = get_rate_limiter()
 
 # Telegram bot API hard limit (bytes). Use 45 MB to stay safely below 50 MB.
-TELEGRAM_LIMIT = 45 * 1024 * 1024
+TELEGRAM_LIMIT = limits.MAX_TELEGRAM_DOWNLOAD_BYTES
 
 # Max callback data length Telegram allows is 64 bytes; we validate within reason
 _MAX_CALLBACK_DATA_LEN = 128
-# Google Drive file IDs: alphanumeric, hyphens, underscores
-_FILE_ID_PATTERN = re.compile(r'^[A-Za-z0-9_-]{1,100}$')
 
 
 # ── validation helpers ────────────────────────────────────────────────────────
@@ -56,8 +59,7 @@ def _validate_callback_data(data: str) -> bool:
 
 
 def _validate_file_id(file_id: str) -> bool:
-    """Validate a Google Drive file ID format."""
-    return bool(_FILE_ID_PATTERN.match(file_id))
+    return validators.validate_drive_id(file_id, allow_root=False)
 
 
 def _is_authenticated(uid: int) -> bool:
@@ -134,43 +136,44 @@ async def _require_stepup(uid: int, action_label: str, query, update, context) -
 async def _send_browse(uid: int, query, update) -> None:
     """Fetch current folder contents and send as a new message."""
     try:
-        fid = nav.current_folder_id(uid)
-        path = nav.breadcrumb(uid)
+        with timing.timed("cb_browse"):
+            fid = nav.current_folder_id(uid)
+            path = nav.breadcrumb(uid)
 
-        try:
-            listing = ds.list_directory(uid, parent_id=fid)
-        except HttpError as e:
-            status = getattr(e, "resp", None)
-            if status and status.status in (400, 404, 410):
-                nav.go_home(uid)
-                fid = nav.current_folder_id(uid)
-                path = nav.breadcrumb(uid)
-                listing = ds.list_directory(uid, parent_id=fid)
-            elif status and status.status in (401, 403):
-                raise PermissionError("User not authenticated.") from e
-            else:
-                raise
+            try:
+                listing = await ds.list_directory_async(uid, parent_id=fid)
+            except HttpError as e:
+                status = getattr(e, "resp", None)
+                if status and status.status in (400, 404, 410):
+                    nav.go_home(uid)
+                    fid = nav.current_folder_id(uid)
+                    path = nav.breadcrumb(uid)
+                    listing = await ds.list_directory_async(uid, parent_id=fid)
+                elif status and status.status in (401, 403):
+                    raise PermissionError("User not authenticated.") from e
+                else:
+                    raise
 
-        folders = listing.folders
-        files = listing.files
+            folders = listing.folders
+            files = listing.files
 
-        index_map = nav.build_flat_index_map(uid, folders, files)
-        
-        # Set as active view: folder browsing context
-        nav.set_active_view(uid, "folder", index_map, metadata={"folder_id": fid})
-        
-        text = formatter.directory_listing(path, index_map, folders, files)
-        if listing.error_count or listing.truncated:
-            text = (
-                formatter.partial_browse_warning(
-                    listing.error_count, listing.truncated, False
+            index_map = nav.build_flat_index_map(uid, folders, files)
+            
+            # Set as active view: folder browsing context
+            nav.set_active_view(uid, "folder", index_map, metadata={"folder_id": fid})
+            
+            text = formatter.directory_listing(path, index_map, folders, files)
+            if listing.error_count or listing.truncated:
+                text = (
+                    formatter.partial_browse_warning(
+                        listing.error_count, listing.truncated, False
+                    )
+                    + "\n\n"
+                    + text
                 )
-                + "\n\n"
-                + text
-            )
-        is_root = (fid == "root")
+            is_root = (fid == "root")
 
-        await _reply(query, update, text, ui.browse_keyboard(is_root=is_root))
+            await _reply(query, update, text, ui.browse_keyboard(is_root=is_root))
     except PermissionError:
         await _reply(query, update, formatter.login_required())
     except Exception as e:
@@ -199,6 +202,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     assert query is not None  # guaranteed by CallbackQueryHandler
     assert update.effective_user is not None
     uid = update.effective_user.id
+    monitoring_context.set_request_context(user_id=uid, request_id=str(update.update_id), operation="callback")
     data = query.data or ""
 
     await query.answer()
@@ -353,7 +357,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         elif action in ("view", "info"):
             try:
-                meta = ds.get_file_metadata(uid, file_id)
+                meta = await ds.get_file_metadata_async(uid, file_id)
                 is_fav = models.is_favorite(uid, file_id)
                 await _reply(
                     query, update,
@@ -374,7 +378,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 else:
                     models.add_favorite(uid, file_id)
                     label = "Added to Favorites"
-                meta = ds.get_file_metadata(uid, file_id)
+                meta = await ds.get_file_metadata_async(uid, file_id)
                 await _reply(
                     query, update,
                     formatter.success(label, meta.get("name")),
@@ -388,7 +392,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         elif action == "delete":
             try:
-                meta = ds.get_file_metadata(uid, file_id)
+                meta = await ds.get_file_metadata_async(uid, file_id)
                 meta["_path"] = nav.breadcrumb(uid)
                 await _reply(
                     query, update,
@@ -421,6 +425,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         if action == "delete":
             try:
+                if _RATE_LIMITER.limited(uid, "delete"):
+                    await _reply(query, update, formatter.error("Please wait before deleting again."))
+                    return
                 if not await _require_stepup(uid, "delete files", query, update, context):
                     return
 
@@ -434,7 +441,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     ))
                     return
                 
-                ds.delete_file(uid, file_id)
+                await ds.delete_file_async(uid, file_id)
                 await _reply(
                     query, update,
                     formatter.success("Deleted"),
@@ -464,27 +471,40 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 return
 
             try:
+                if _RATE_LIMITER.limited(uid, "upload"):
+                    await _reply(query, update, formatter.error("Please wait before uploading again."))
+                    return
                 if not await _require_stepup(uid, "upload files", query, update, context):
                     return
 
-                from drive.drive_service import upload_file
+                from drive.drive_service import upload_file_async
                 fid = nav.current_folder_id(uid)
-                if "file_bytes" in pending:
-                    file_bytes = pending["file_bytes"]
-                else:
-                    tg_file = await context.bot.get_file(pending["file_id"])
-                    file_bytes = await tg_file.download_as_bytearray()
-                uploaded = upload_file(
-                    uid,
-                    file_bytes,
-                    pending["file_name"],
-                    parent_id=fid,
+                tg_file = await context.bot.get_file(pending["file_id"])
+                file_bytes = await tg_file.download_as_bytearray()
+                ok, reason, safe_name, detected_mime = uploads.validate_upload(
+                    bytes(file_bytes),
+                    pending.get("file_name", ""),
+                    pending.get("declared_mime", ""),
+                    limits.MAX_UPLOAD_BYTES,
                 )
-                await _reply(
-                    query, update,
-                    formatter.upload_success(uploaded["name"], nav.breadcrumb(uid)),
-                    ui.post_login_keyboard(),
-                )
+                if not ok:
+                    await _reply(query, update, formatter.error(reason))
+                    return
+                temp_path = sandbox.write_bytes(uid, safe_name, bytes(file_bytes))
+                try:
+                    uploaded = await upload_file_async(
+                        uid,
+                        bytes(file_bytes),
+                        safe_name,
+                        parent_id=fid,
+                    )
+                    await _reply(
+                        query, update,
+                        formatter.upload_success(uploaded["name"], nav.breadcrumb(uid)),
+                        ui.post_login_keyboard(),
+                    )
+                finally:
+                    sandbox.remove_file(temp_path)
             except Exception as e:
                 logger.exception("Upload confirm error")
                 await _reply(query, update, formatter.error(
@@ -514,55 +534,50 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def _handle_download(uid: int, file_id: str, query, context, update) -> None:
     """Download a file from Drive and send it to Telegram."""
     try:
-        if not await _require_stepup(uid, "download files", query, update, context):
-            return
+        with timing.timed("cb_download"):
+            if _RATE_LIMITER.limited(uid, "download"):
+                await _reply(query, update, formatter.error("Please wait before downloading again."))
+                return
+            if not await _require_stepup(uid, "download files", query, update, context):
+                return
 
-        # Check for anomaly before downloading
-        if await anomaly_detection.check_anomaly(uid, "download"):
-            await _reply(query, update, formatter.error(
-                "⛔ Unusual Activity Detected",
-                "Your Google Drive access has been suspended for security.\n\n"
-                "Check your email and Telegram for alerts.\n"
-                "Use /login to reconnect when ready."
-            ))
-            return
+            # Check for anomaly before downloading
+            if await anomaly_detection.check_anomaly(uid, "download"):
+                await _reply(query, update, formatter.error(
+                    "⛔ Unusual Activity Detected",
+                    "Your Google Drive access has been suspended for security.\n\n"
+                    "Check your email and Telegram for alerts.\n"
+                    "Use /login to reconnect when ready."
+                ))
+                return
 
-        meta = ds.get_file_metadata(uid, file_id)
-        fname = meta.get("name", "file")
-        size_raw = int(meta["size"]) if meta.get("size") else 0
-        size_str = human_size(size_raw) if size_raw else "Unknown"
+            meta = await ds.get_file_metadata_async(uid, file_id)
+            fname = meta.get("name", "file")
+            size_raw = int(meta["size"]) if meta.get("size") else 0
+            size_str = human_size(size_raw) if size_raw else "Unknown"
 
-        if size_raw > TELEGRAM_LIMIT:
-            view_link = meta.get("webViewLink", "")
-            content_link = meta.get("webContentLink", "")
-            await _reply(
-                query, update,
-                formatter.download_too_large(fname, size_str, view_link, content_link),
-                ui.back_to_menu_keyboard(),
+            if size_raw > TELEGRAM_LIMIT:
+                view_link = meta.get("webViewLink", "")
+                content_link = meta.get("webContentLink", "")
+                await _reply(
+                    query, update,
+                    formatter.download_too_large(fname, size_str, view_link, content_link),
+                    ui.back_to_menu_keyboard(),
+                )
+                return
+
+            manager = get_task_manager(context)
+            if not manager:
+                await _reply(query, update, formatter.error("Background queue unavailable."))
+                return
+            assert update.effective_chat is not None
+            await manager.enqueue_download(
+                telegram_id=uid,
+                chat_id=update.effective_chat.id,
+                file_id=file_id,
+                filename=fname,
+                size_str=size_str,
             )
-            return
-
-        progress_msg = await update.effective_chat.send_message(
-            formatter.download_progress(fname, size_str)
-        )
-
-        file_bytes, downloaded_name = await asyncio.to_thread(ds.download_file, uid, file_id)
-
-        await context.bot.send_document(
-            chat_id=update.effective_chat.id,
-            document=io.BytesIO(file_bytes),
-            filename=downloaded_name,
-            read_timeout=180,
-            write_timeout=180,
-            connect_timeout=30,
-        )
-
-        try:
-            await progress_msg.edit_text(
-                formatter.success("Download Complete", downloaded_name)
-            )
-        except Exception:
-            pass
 
     except PermissionError:
         await _reply(query, update, formatter.login_required(), ui.back_to_menu_keyboard())

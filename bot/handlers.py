@@ -46,17 +46,23 @@ from bot.commands import (
     cmd_email,
     cmd_verify,
     cmd_clear,
-    _EMAIL_PATTERN,
 )
 from bot.callbacks import handle_callback
+from bot.errors import handle_error
 from bot import formatter, nav, ui
 from db import models
 from services import stepup_auth
+from security import limits, validators
+from security import uploads
+from security.rate_limit import get_rate_limiter
+from storage import sandbox
+from monitoring import context as monitoring_context
 
 logger = logging.getLogger(__name__)
+_RATE_LIMITER = get_rate_limiter()
 
 # Max upload size (20 MB — Telegram bot API limit for file downloads)
-MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+MAX_UPLOAD_BYTES = limits.MAX_UPLOAD_BYTES
 
 
 async def handle_file_upload(update, context) -> None:
@@ -70,9 +76,10 @@ async def handle_file_upload(update, context) -> None:
       - Sanitizes filename
       - Checks authentication
     """
-    from drive.drive_service import upload_file, _sanitize_filename
+    from drive.drive_service import upload_file_async, _sanitize_filename
 
     uid = update.effective_user.id
+    monitoring_context.set_request_context(user_id=uid, request_id=str(update.update_id), operation="upload")
     if not update.message:
         return
 
@@ -89,19 +96,28 @@ async def handle_file_upload(update, context) -> None:
         await update.message.reply_text(formatter.login_required())
         return
 
+    if _RATE_LIMITER.limited(uid, "upload"):
+        await update.message.reply_text(
+            formatter.error("Please wait before uploading again.")
+        )
+        return
+
     # Validate file size before downloading (defense in depth)
     file_size = None
     file_id = ""
     file_name = ""
 
+    declared_mime = ""
     if doc:
         file_id = doc.file_id
         file_size = doc.file_size
         file_name = doc.file_name or "unnamed_file"
+        declared_mime = doc.mime_type or ""
     elif video:
         file_id = video.file_id
         file_size = video.file_size
         file_name = video.file_name or f"video_{video.file_unique_id}.mp4"
+        declared_mime = video.mime_type or ""
     elif photo:
         file_id = photo.file_id
         file_size = photo.file_size
@@ -116,8 +132,6 @@ async def handle_file_upload(update, context) -> None:
         )
         return
 
-    # Sanitize filename
-    safe_filename = _sanitize_filename(file_name)
     try:
         # Step-up verification for uploads
         result = await stepup_auth.request_verification(uid, "upload files")
@@ -126,11 +140,12 @@ async def handle_file_upload(update, context) -> None:
             assert context.user_data is not None
             context.user_data["pending_upload"] = {
                 "file_id": file_id,
-                "file_name": safe_filename,
+                "file_name": _sanitize_filename(file_name),
+                "declared_mime": declared_mime,
             }
             context.user_data["pending_stepup_action"] = "upload files"
             await update.message.reply_text(
-                formatter.upload_confirm(safe_filename, nav.breadcrumb(uid)),
+                formatter.upload_confirm(_sanitize_filename(file_name), nav.breadcrumb(uid)),
                 reply_markup=ui.upload_confirm_keyboard(),
             )
             if status == "no_email":
@@ -166,18 +181,27 @@ async def handle_file_upload(update, context) -> None:
                     formatter.error("Verification required.", "Use /verify <code>")
                 )
             return
-
         tg_file = await context.bot.get_file(file_id)
         file_bytes = await tg_file.download_as_bytearray()
+        ok, reason, safe_filename, detected_mime = uploads.validate_upload(
+            bytes(file_bytes), file_name, declared_mime, MAX_UPLOAD_BYTES
+        )
+        if not ok:
+            await update.message.reply_text(formatter.error(reason))
+            return
+        temp_path = sandbox.write_bytes(uid, safe_filename, bytes(file_bytes))
 
         # Direct upload (no confirmation)
         await update.message.reply_text(formatter.processing("Uploading"))
         fid = nav.current_folder_id(uid)
-        uploaded = upload_file(uid, bytes(file_bytes), safe_filename, parent_id=fid)
-        await update.message.reply_text(
-            formatter.upload_success(uploaded["name"], nav.breadcrumb(uid)),
-            reply_markup=ui.post_login_keyboard(),
-        )
+        try:
+            uploaded = await upload_file_async(uid, bytes(file_bytes), safe_filename, parent_id=fid)
+            await update.message.reply_text(
+                formatter.upload_success(uploaded["name"], nav.breadcrumb(uid)),
+                reply_markup=ui.post_login_keyboard(),
+            )
+        finally:
+            sandbox.remove_file(temp_path)
 
     except PermissionError:
         await update.message.reply_text(formatter.login_required())
@@ -195,6 +219,7 @@ async def handle_text_input(update, context) -> None:
 
     assert context.user_data is not None
     uid = update.effective_user.id
+    monitoring_context.set_request_context(user_id=uid, request_id=str(update.update_id), operation="text")
     text = update.message.text.strip()
 
     # Require authentication for guided flows
@@ -204,7 +229,7 @@ async def handle_text_input(update, context) -> None:
         return
 
     if context.user_data.get("awaiting_email"):
-        if not _EMAIL_PATTERN.match(text):
+        if not validators.validate_email(text):
             await update.message.reply_text(
                 formatter.error(
                     "Invalid email format.",
@@ -261,7 +286,7 @@ async def handle_text_input(update, context) -> None:
         return
 
     # Passive email capture after login (if user replies with an email)
-    if _EMAIL_PATTERN.match(text) and not models.get_user_email(uid):
+    if validators.validate_email(text) and not models.get_user_email(uid):
         if models.set_user_email(uid, text):
             await update.message.reply_text(
                 f"✅ Email updated\n\n"
@@ -364,5 +389,8 @@ def register_handlers(app: Application) -> None:
 
     # ── File uploads ──────────────────────────────────────────────────────────
     app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO | filters.VIDEO, handle_file_upload))
+
+    # ── Global error handler ───────────────────────────────────────────────────
+    app.add_error_handler(handle_error)
 
     logger.info("All handlers registered successfully.")

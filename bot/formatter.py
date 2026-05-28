@@ -536,6 +536,42 @@ def zip_ready(filename: str, count: int) -> str:
     )
 
 
+def task_queued(action: str, target: str, size_str: str | None, job_id: str) -> str:
+    lines = [
+        f"🧾 {action} Queued",
+        "",
+        f"  ID: {job_id[:8]}",
+    ]
+    if target:
+        lines.append(f"  Item: {target}")
+    if size_str:
+        lines.append(f"  Size: {size_str}")
+    lines.append("")
+    lines.append("  You will receive the result shortly.")
+    return "\n".join(lines)
+
+
+def task_running(task_type: str) -> str:
+    label = "Processing" if task_type else "Working"
+    return f"⏳ {label}...\n\n  Please wait."
+
+
+def task_complete(action: str, filename: str | None = None) -> str:
+    lines = [f"✅ {action} Complete"]
+    if filename:
+        lines.append("")
+        lines.append(f"  📄 {filename}")
+    return "\n".join(lines)
+
+
+def task_failed(action: str) -> str:
+    return (
+        f"❌ {action} Failed\n"
+        "\n"
+        "  Please try again or use /help."
+    )
+
+
 # ── Download ──────────────────────────────────────────────────────────────────
 
 def download_progress(filename: str, size_str: str) -> str:

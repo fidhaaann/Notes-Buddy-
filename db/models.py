@@ -149,6 +149,18 @@ def init_db() -> None:
                 last_sent_at  TEXT,
                 attempts      INTEGER DEFAULT 0
             );
+
+            CREATE TABLE IF NOT EXISTS task_jobs (
+                id            TEXT PRIMARY KEY,
+                telegram_id   INTEGER NOT NULL,
+                job_type      TEXT NOT NULL,
+                status        TEXT NOT NULL,
+                progress      INTEGER DEFAULT 0,
+                detail        TEXT,
+                error_message TEXT,
+                created_at    TEXT DEFAULT (datetime('now')),
+                updated_at    TEXT DEFAULT (datetime('now'))
+            );
             """
         )
         # ── Schema migrations for existing databases ──────────────────────────
@@ -217,6 +229,24 @@ def init_db() -> None:
                 """
             )
             logger.info("Created stepup_auth table.")
+
+        if "task_jobs" not in tables:
+            conn.execute(
+                """
+                CREATE TABLE task_jobs (
+                    id            TEXT PRIMARY KEY,
+                    telegram_id   INTEGER NOT NULL,
+                    job_type      TEXT NOT NULL,
+                    status        TEXT NOT NULL,
+                    progress      INTEGER DEFAULT 0,
+                    detail        TEXT,
+                    error_message TEXT,
+                    created_at    TEXT DEFAULT (datetime('now')),
+                    updated_at    TEXT DEFAULT (datetime('now'))
+                )
+                """
+            )
+            logger.info("Created task_jobs table.")
     _restrict_db_permissions()
     if _fernet:
         logger.info("Token encryption enabled.")
@@ -520,6 +550,64 @@ def is_stepup_verified(telegram_id: int, now_iso: str) -> bool:
             (telegram_id, now_iso),
         ).fetchone()
     return row is not None
+
+
+# ── Background task helpers ───────────────────────────────────────────────────
+
+def create_task_job(job_id: str, telegram_id: int, job_type: str, detail: str | None = None) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO task_jobs (id, telegram_id, job_type, status, detail)
+            VALUES (?, ?, ?, 'queued', ?)
+            """,
+            (job_id, telegram_id, job_type, detail),
+        )
+
+
+def update_task_job(
+    job_id: str,
+    status: str | None = None,
+    progress: int | None = None,
+    detail: str | None = None,
+    error_message: str | None = None,
+) -> None:
+    updates: list[str] = []
+    params: list = []
+    if status is not None:
+        updates.append("status = ?")
+        params.append(status)
+    if progress is not None:
+        updates.append("progress = ?")
+        params.append(progress)
+    if detail is not None:
+        updates.append("detail = ?")
+        params.append(detail)
+    if error_message is not None:
+        updates.append("error_message = ?")
+        params.append(error_message)
+    updates.append("updated_at = datetime('now')")
+    params.append(job_id)
+    if not updates:
+        return
+    with get_connection() as conn:
+        conn.execute(
+            f"UPDATE task_jobs SET {', '.join(updates)} WHERE id = ?",
+            params,
+        )
+
+
+def cleanup_task_jobs(ttl_seconds: int) -> None:
+    """Remove completed/failed task records older than ttl_seconds."""
+    with get_connection() as conn:
+        conn.execute(
+            """
+            DELETE FROM task_jobs
+            WHERE status IN ('completed', 'failed')
+              AND updated_at < datetime('now', ?)
+            """,
+            (f"-{ttl_seconds} seconds",),
+        )
 
 
 # ── Anomaly detection helpers ──────────────────────────────────────────────────

@@ -16,11 +16,9 @@ Security:
 """
 
 import asyncio
-import io
 import logging
 import os
 import re
-import time
 
 from telegram import Update
 from telegram.ext import ContextTypes
@@ -31,24 +29,22 @@ from drive import drive_service as ds
 from bot import formatter, ui
 from bot import nav
 from services import parser as p
-from services.zip_service import create_zip
 from services import anomaly_detection
 from services import stepup_auth
 from db import models
+from monitoring import context as monitoring_context
+from monitoring import timing
+from security import limits, validators
+from security.rate_limit import get_rate_limiter
+from tasks.manager import get_task_manager
 
 logger = logging.getLogger(__name__)
 
-# Email validation
-_EMAIL_PATTERN = re.compile(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$')
-
 # Safety limits
-MAX_ZIP_FILES = 20
-MAX_ZIP_BYTES = 100 * 1024 * 1024  # 100 MB
-TELEGRAM_LIMIT = 45 * 1024 * 1024  # 45 MB safe margin
+TELEGRAM_LIMIT = limits.MAX_TELEGRAM_DOWNLOAD_BYTES
 
-# Rate limiting: (command_key) -> {uid: last_timestamp}
-_RATE_LIMITS: dict[str, dict[int, float]] = {}
-_RATE_COOLDOWN = 3.0  # seconds between expensive operations per user
+# Rate limiter
+_RATE_LIMITER = get_rate_limiter()
 
 # F-04: Optional user allowlist — if set, only these Telegram IDs can use the bot.
 # Format: comma-separated IDs, e.g. "123456789,987654321"
@@ -75,7 +71,9 @@ def _is_allowed(uid: int) -> bool:
 
 def _uid(update: Update) -> int:
     assert update.effective_user is not None  # guaranteed by handler filters
-    return update.effective_user.id
+    uid = update.effective_user.id
+    monitoring_context.set_request_context(user_id=uid, request_id=str(update.update_id))
+    return uid
 
 
 def _msg(update: Update):  # noqa: ANN202
@@ -127,23 +125,12 @@ def _validate_index(index: str) -> bool:
       - Max length of 10 characters
       - No empty segments
     """
-    if not index or len(index) > 10:
-        return False
-    if not re.match(r'^[0-9]+(\.[0-9]+){0,2}$', index):
-        return False
-    return True
+    return validators.validate_index(index)
 
 
 def _check_rate_limit(uid: int, operation: str) -> bool:
     """Returns True if the user is rate-limited (should be blocked)."""
-    now = time.monotonic()
-    if operation not in _RATE_LIMITS:
-        _RATE_LIMITS[operation] = {}
-    last = _RATE_LIMITS[operation].get(uid, 0)
-    if now - last < _RATE_COOLDOWN:
-        return True  # rate limited
-    _RATE_LIMITS[operation][uid] = now
-    return False
+    return _RATE_LIMITER.limited(uid, operation)
 
 
 async def _require_stepup(update: Update, context: ContextTypes.DEFAULT_TYPE, action_label: str) -> bool:
@@ -186,16 +173,6 @@ async def _require_stepup(update: Update, context: ContextTypes.DEFAULT_TYPE, ac
         return False
     await _msg(update).reply_text(formatter.error("Verification required.", "Use /verify <code>"))
     return False
-
-
-def _sanitize_zip_filename(keyword: str) -> str:
-    """Sanitize a keyword for use as a ZIP filename."""
-    # Remove anything that's not alphanumeric, dash, underscore, or space
-    safe = re.sub(r'[^\w\s-]', '', keyword).strip()
-    safe = re.sub(r'\s+', '_', safe)
-    if not safe:
-        safe = "archive"
-    return safe[:50]  # Limit length
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -256,46 +233,47 @@ async def cmd_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     try:
-        fid = nav.current_folder_id(uid)
-        path = nav.breadcrumb(uid)
+        with timing.timed("cmd_info"):
+            fid = nav.current_folder_id(uid)
+            path = nav.breadcrumb(uid)
 
-        try:
-            listing = ds.list_directory(uid, parent_id=fid)
-        except HttpError as e:
-            status = getattr(e, "resp", None)
-            if status and status.status in (400, 404, 410):
-                nav.go_home(uid)
-                fid = nav.current_folder_id(uid)
-                path = nav.breadcrumb(uid)
-                listing = ds.list_directory(uid, parent_id=fid)
-            elif status and status.status in (401, 403):
-                raise PermissionError("User not authenticated.") from e
-            else:
-                raise
+            try:
+                listing = await ds.list_directory_async(uid, parent_id=fid)
+            except HttpError as e:
+                status = getattr(e, "resp", None)
+                if status and status.status in (400, 404, 410):
+                    nav.go_home(uid)
+                    fid = nav.current_folder_id(uid)
+                    path = nav.breadcrumb(uid)
+                    listing = await ds.list_directory_async(uid, parent_id=fid)
+                elif status and status.status in (401, 403):
+                    raise PermissionError("User not authenticated.") from e
+                else:
+                    raise
 
-        folders = listing.folders
-        files = listing.files
+            folders = listing.folders
+            files = listing.files
 
-        index_map = nav.build_flat_index_map(uid, folders, files)
-        
-        # Set as active view: folder browsing context
-        nav.set_active_view(uid, "folder", index_map, metadata={"folder_id": fid})
+            index_map = nav.build_flat_index_map(uid, folders, files)
+            
+            # Set as active view: folder browsing context
+            nav.set_active_view(uid, "folder", index_map, metadata={"folder_id": fid})
 
-        text = formatter.directory_listing(path, index_map, folders, files)
-        if listing.error_count or listing.truncated:
-            text = (
-                formatter.partial_browse_warning(
-                    listing.error_count, listing.truncated, False
+            text = formatter.directory_listing(path, index_map, folders, files)
+            if listing.error_count or listing.truncated:
+                text = (
+                    formatter.partial_browse_warning(
+                        listing.error_count, listing.truncated, False
+                    )
+                    + "\n\n"
+                    + text
                 )
-                + "\n\n"
-                + text
-            )
-        is_root = (fid == "root")
+            is_root = (fid == "root")
 
-        await _msg(update).reply_text(
-            text,
-            reply_markup=ui.browse_keyboard(is_root=is_root),
-        )
+            await _msg(update).reply_text(
+                text,
+                reply_markup=ui.browse_keyboard(is_root=is_root),
+            )
     except PermissionError:
         await _msg(update).reply_text(formatter.login_required())
     except Exception as e:
@@ -348,7 +326,7 @@ async def cmd_cd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     index = args[0].strip()
     
     # Validate as simple integer
-    if not index.isdigit():
+    if not validators.validate_simple_index(index):
         await _msg(update).reply_text(
             formatter.error(
                 "Invalid index.",
@@ -385,8 +363,24 @@ async def cmd_cd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 )
             )
             return
+        if nav.is_in_stack(uid, item.shortcut_target_id):
+            await _msg(update).reply_text(
+                formatter.error(
+                    "Navigation loop detected.",
+                    "This folder is already in your path.",
+                )
+            )
+            return
         nav.push_folder(uid, item.shortcut_target_id, item.name)
     else:
+        if nav.is_in_stack(uid, item.id):
+            await _msg(update).reply_text(
+                formatter.error(
+                    "Navigation loop detected.",
+                    "This folder is already in your path.",
+                )
+            )
+            return
         nav.push_folder(uid, item.id, item.name)
     # Show contents of the new directory
     await cmd_info(update, context)
@@ -427,7 +421,7 @@ async def cmd_download(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     index = args[0].strip()
     
     # Validate as simple integer
-    if not index.isdigit():
+    if not validators.validate_simple_index(index):
         await _msg(update).reply_text(
             formatter.error(
                 "Invalid index.",
@@ -468,62 +462,51 @@ async def cmd_download(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     try:
-        if not await _require_stepup(update, context, "download files"):
-            return
+        with timing.timed("cmd_download"):
+            if not await _require_stepup(update, context, "download files"):
+                return
 
-        if await anomaly_detection.check_anomaly(uid, "download"):
-            await _msg(update).reply_text(
-                formatter.error(
-                    "⛔ Unusual Activity Detected",
-                    "Your Google Drive access has been suspended for security.\n\n"
-                    "Check your email and Telegram for alerts.\n"
-                    "Use /login to reconnect when ready.",
+            if await anomaly_detection.check_anomaly(uid, "download"):
+                await _msg(update).reply_text(
+                    formatter.error(
+                        "⛔ Unusual Activity Detected",
+                        "Your Google Drive access has been suspended for security.\n\n"
+                        "Check your email and Telegram for alerts.\n"
+                        "Use /login to reconnect when ready.",
+                    )
                 )
+                return
+
+            # Get metadata for size check
+            meta = await ds.get_file_metadata_async(uid, item.id)
+            fname = meta.get("name", item.name)
+            size_raw = int(meta["size"]) if meta.get("size") else 0
+            size_str = p.human_size(size_raw) if size_raw else "Unknown"
+
+            # Too large for Telegram
+            if size_raw > TELEGRAM_LIMIT:
+                view_link = meta.get("webViewLink", "")
+                content_link = meta.get("webContentLink", "")
+                await _msg(update).reply_text(
+                    formatter.download_too_large(fname, size_str, view_link, content_link),
+                    reply_markup=ui.back_to_menu_keyboard(),
+                )
+                return
+
+            manager = get_task_manager(context)
+            if not manager:
+                await _msg(update).reply_text(
+                    formatter.error("Background queue unavailable.", "Try again later.")
+                )
+                return
+            assert update.effective_chat is not None
+            await manager.enqueue_download(
+                telegram_id=uid,
+                chat_id=update.effective_chat.id,
+                file_id=item.id,
+                filename=fname,
+                size_str=size_str,
             )
-            return
-
-        # Get metadata for size check
-        meta = ds.get_file_metadata(uid, item.id)
-        fname = meta.get("name", item.name)
-        size_raw = int(meta["size"]) if meta.get("size") else 0
-        size_str = p.human_size(size_raw) if size_raw else "Unknown"
-
-        # Too large for Telegram
-        if size_raw > TELEGRAM_LIMIT:
-            view_link = meta.get("webViewLink", "")
-            content_link = meta.get("webContentLink", "")
-            await _msg(update).reply_text(
-                formatter.download_too_large(fname, size_str, view_link, content_link),
-                reply_markup=ui.back_to_menu_keyboard(),
-            )
-            return
-
-        # Send progress message
-        progress_msg = await _msg(update).reply_text(
-            formatter.download_progress(fname, size_str)
-        )
-
-        # Download in background thread
-        file_bytes, downloaded_name = await asyncio.to_thread(ds.download_file, uid, item.id)
-
-        # Send file
-        assert update.effective_chat is not None
-        await context.bot.send_document(
-            chat_id=update.effective_chat.id,
-            document=io.BytesIO(file_bytes),
-            filename=downloaded_name,
-            read_timeout=180,
-            write_timeout=180,
-            connect_timeout=30,
-        )
-
-        # Update progress message
-        try:
-            await progress_msg.edit_text(
-                formatter.success("Download Complete", downloaded_name)
-            )
-        except Exception:
-            pass
 
     except PermissionError:
         await _msg(update).reply_text(formatter.login_required())
@@ -561,7 +544,7 @@ async def cmd_more(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     index = args[0].strip()
     
     # Validate as simple integer
-    if not index.isdigit():
+    if not validators.validate_simple_index(index):
         await _msg(update).reply_text(
             formatter.error(
                 "Invalid index.",
@@ -582,7 +565,7 @@ async def cmd_more(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     try:
-        meta = ds.get_file_metadata(uid, item.id)
+        meta = await ds.get_file_metadata_async(uid, item.id)
         meta["_path"] = item.path
         is_fav = models.is_favorite(uid, item.id)
         await _msg(update).reply_text(
@@ -651,38 +634,41 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         )
         return
 
-    keyword = " ".join(args)
-    # Limit keyword length to prevent abuse
-    if len(keyword) > 100:
-        keyword = keyword[:100]
+    keyword = validators.normalize_keyword(" ".join(args), limits.MAX_SEARCH_LEN)
+    if not keyword:
+        await _msg(update).reply_text(
+            formatter.error("Invalid keyword.", "Try a different search term.")
+        )
+        return
 
     try:
-        files = ds.search_files(uid, keyword)
-        
-        # Build proper IndexedItem objects for search results
-        index_map: dict[str, nav.IndexedItem] = {}
-        for i, f in enumerate(files, 1):
-            idx = str(i)
-            index_map[idx] = nav.IndexedItem(
-                id=f["id"],
-                name=f["name"],
-                mime_type=f.get("mimeType", ""),
-                is_folder="folder" in f.get("mimeType", "").lower(),
-                parent_index="",
-                full_index=idx,
-                is_shortcut=False,
-                shortcut_target_id=None,
-                shortcut_target_mime_type=None,
-                path=f"Search: {keyword}",
+        with timing.timed("cmd_search"):
+            files = await ds.search_files_async(uid, keyword)
+
+            # Build proper IndexedItem objects for search results
+            index_map: dict[str, nav.IndexedItem] = {}
+            for i, f in enumerate(files, 1):
+                idx = str(i)
+                index_map[idx] = nav.IndexedItem(
+                    id=f["id"],
+                    name=f["name"],
+                    mime_type=f.get("mimeType", ""),
+                    is_folder="folder" in f.get("mimeType", "").lower(),
+                    parent_index="",
+                    full_index=idx,
+                    is_shortcut=False,
+                    shortcut_target_id=None,
+                    shortcut_target_mime_type=None,
+                    path=f"Search: {keyword}",
+                )
+
+            # Set as active view: search results context
+            nav.set_active_view(uid, "search", index_map, metadata={"keyword": keyword})
+
+            await _msg(update).reply_text(
+                formatter.search_results_indexed(keyword, index_map),
+                reply_markup=ui.back_to_menu_keyboard(),
             )
-        
-        # Set as active view: search results context
-        nav.set_active_view(uid, "search", index_map, metadata={"keyword": keyword})
-        
-        await _msg(update).reply_text(
-            formatter.search_results_indexed(keyword, index_map),
-            reply_markup=ui.back_to_menu_keyboard(),
-        )
     except PermissionError:
         await _msg(update).reply_text(formatter.login_required())
     except Exception as e:
@@ -698,6 +684,14 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 async def cmd_rename(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     uid = _uid(update)
+    if not _is_authenticated(uid):
+        await _msg(update).reply_text(formatter.login_required())
+        return
+    if _check_rate_limit(uid, "rename"):
+        await _msg(update).reply_text(
+            formatter.error("Please wait before renaming again.")
+        )
+        return
     args = p.parse_args(_text(update), "/rename")
     if len(args) < 2:
         await _msg(update).reply_text(
@@ -723,7 +717,7 @@ async def cmd_rename(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 )
             )
             return
-        updated = ds.rename_file(uid, item.id, new_name)
+        updated = await ds.rename_file_async(uid, item.id, new_name)
         await _msg(update).reply_text(
             formatter.success("Renamed", updated['name']),
             reply_markup=ui.back_to_menu_keyboard(),
@@ -739,6 +733,14 @@ async def cmd_rename(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 async def cmd_move(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     uid = _uid(update)
+    if not _is_authenticated(uid):
+        await _msg(update).reply_text(formatter.login_required())
+        return
+    if _check_rate_limit(uid, "move"):
+        await _msg(update).reply_text(
+            formatter.error("Please wait before moving again.")
+        )
+        return
     args = p.parse_args(_text(update), "/move")
     if len(args) < 2:
         await _msg(update).reply_text(
@@ -792,7 +794,7 @@ async def cmd_move(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 )
                 return
             dest_id = dest_item.shortcut_target_id
-        ds.move_file(uid, file_item.id, dest_id)
+        await ds.move_file_async(uid, file_item.id, dest_id)
         await _msg(update).reply_text(
             formatter.success("Moved", file_item.name, dest_item.name),
             reply_markup=ui.back_to_menu_keyboard(),
@@ -808,6 +810,14 @@ async def cmd_move(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     uid = _uid(update)
+    if not _is_authenticated(uid):
+        await _msg(update).reply_text(formatter.login_required())
+        return
+    if _check_rate_limit(uid, "delete"):
+        await _msg(update).reply_text(
+            formatter.error("Please wait before deleting again.")
+        )
+        return
     args = p.parse_args(_text(update), "/delete")
     if not args:
         await _msg(update).reply_text(
@@ -834,7 +844,7 @@ async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                     )
                 )
                 return
-            meta = ds.get_file_metadata(uid, item.id)
+            meta = await ds.get_file_metadata_async(uid, item.id)
             meta["_path"] = item.path
             await _msg(update).reply_text(
                 formatter.confirm_delete_preview(meta, target),
@@ -858,6 +868,14 @@ async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 async def cmd_mkdir(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     uid = _uid(update)
+    if not _is_authenticated(uid):
+        await _msg(update).reply_text(formatter.login_required())
+        return
+    if _check_rate_limit(uid, "mkdir"):
+        await _msg(update).reply_text(
+            formatter.error("Please wait before creating folders again.")
+        )
+        return
     args = p.parse_args(_text(update), "/mkdir")
     if not args:
         await _msg(update).reply_text(
@@ -866,7 +884,7 @@ async def cmd_mkdir(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     name = " ".join(args)
     try:
-        created = ds.create_folder(uid, name, parent_id=nav.current_folder_id(uid))
+        created = await ds.create_folder_async(uid, name, parent_id=nav.current_folder_id(uid))
         await _msg(update).reply_text(
             formatter.success("Folder Created", created["name"], nav.breadcrumb(uid)),
             reply_markup=ui.back_to_menu_keyboard(),
@@ -887,6 +905,10 @@ async def cmd_mkdir(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_zip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     uid = _uid(update)
 
+    if not _is_authenticated(uid):
+        await _msg(update).reply_text(formatter.login_required())
+        return
+
     if _check_rate_limit(uid, "zip"):
         await _msg(update).reply_text(
             formatter.error("Please wait before creating another archive.")
@@ -899,63 +921,23 @@ async def cmd_zip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             formatter.error("Missing keyword.", "Usage: /zip <keyword>")
         )
         return
-    keyword = " ".join(args)
-    # Limit keyword length
-    if len(keyword) > 100:
-        keyword = keyword[:100]
+    keyword = validators.normalize_keyword(" ".join(args), limits.MAX_SEARCH_LEN)
+    if not keyword:
+        await _msg(update).reply_text(
+            formatter.error("Invalid keyword.", "Try a different search term.")
+        )
+        return
 
     try:
-        files = ds.search_files(uid, keyword)
-        if not files:
-            await _msg(update).reply_text(
-                formatter.error("No files matched your keyword.", "Try a different keyword.")
-            )
-            return
-
-        if len(files) > MAX_ZIP_FILES:
-            await _msg(update).reply_text(
-                formatter.error(
-                    f"Too many files ({len(files)}).",
-                    f"ZIP is limited to {MAX_ZIP_FILES} files. Use a more specific keyword.",
+        with timing.timed("cmd_zip"):
+            manager = get_task_manager(context)
+            if not manager:
+                await _msg(update).reply_text(
+                    formatter.error("Background queue unavailable.", "Try again later.")
                 )
-            )
-            return
-
-        total = sum(int(f.get("size", 0)) for f in files)
-        if total > MAX_ZIP_BYTES:
-            await _msg(update).reply_text(
-                formatter.error(
-                    f"Combined size too large ({p.human_size(total)}).",
-                    f"ZIP is limited to {p.human_size(MAX_ZIP_BYTES)}. Use a more specific keyword.",
-                )
-            )
-            return
-
-        size_str = p.human_size(total) if total else "Unknown"
-        await _msg(update).reply_text(formatter.zip_preparing(len(files), size_str))
-
-        collected: list[tuple[bytes, str]] = []
-        for f in files:
-            try:
-                file_bytes, fname = ds.download_file(uid, f["id"])
-                collected.append((file_bytes, fname))
-            except Exception:
-                logger.warning("Skipping %s in ZIP — download failed", f.get("name", "unknown"))
-
-        if not collected:
-            await _msg(update).reply_text(
-                formatter.error("Could not download any files for the archive.")
-            )
-            return
-
-        zip_bytes = create_zip(collected)
-        # Sanitize keyword for use as filename
-        zip_name = f"{_sanitize_zip_filename(keyword)}_files.zip"
-        await _msg(update).reply_document(
-            document=io.BytesIO(zip_bytes),
-            filename=zip_name,
-            caption=formatter.zip_ready(zip_name, len(collected)),
-        )
+                return
+            assert update.effective_chat is not None
+            await manager.enqueue_zip(uid, update.effective_chat.id, keyword)
     except PermissionError:
         await _msg(update).reply_text(formatter.login_required())
     except Exception as e:
@@ -1061,7 +1043,7 @@ async def cmd_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     email = " ".join(args).strip()
     
     # Validate email format
-    if not _EMAIL_PATTERN.match(email):
+    if not validators.validate_email(email):
         await _msg(update).reply_text(
             formatter.error(
                 "Invalid email format.",

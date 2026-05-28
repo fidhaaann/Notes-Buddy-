@@ -122,6 +122,11 @@ def clear_user(uid: int) -> None:
     _sessions.pop(uid, None)
 
 
+def is_in_stack(uid: int, folder_id: str) -> bool:
+    """Check if a folder already exists in the current breadcrumb stack."""
+    return any(fid == folder_id for fid, _ in _get(uid).stack)
+
+
 # ── View context management ──────────────────────────────────────────────────
 
 def set_active_view(
@@ -253,3 +258,17 @@ def build_flat_index_map(uid: int, folders: list[dict], files: list[dict]) -> di
 def build_index_map(uid: int, folders: list[dict], files: list[dict]) -> dict[str, IndexedItem]:
     """Alias for backward compatibility. Use build_flat_index_map() instead."""
     return build_flat_index_map(uid, folders, files)
+
+
+def cleanup_expired_sessions() -> int:
+    """Remove expired user sessions and return count removed."""
+    now = time.monotonic()
+    removed = 0
+    for uid in list(_sessions.keys()):
+        session = _sessions.get(uid)
+        if not session:
+            continue
+        if now - session.last_access > _SESSION_TTL:
+            _sessions.pop(uid, None)
+            removed += 1
+    return removed
