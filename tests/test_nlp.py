@@ -23,6 +23,80 @@ class TestNlpIntent(unittest.TestCase):
         intent = router.interpret_intent("find module 2 pdf")
         self.assertEqual(intent.intent, intents.IntentType.SEARCH)
 
+    def test_login_intent(self) -> None:
+        intent = router.interpret_intent("connect my drive")
+        self.assertEqual(intent.intent, intents.IntentType.LOGIN)
+
+    def test_start_intent(self) -> None:
+        intent = router.interpret_intent("start")
+        self.assertEqual(intent.intent, intents.IntentType.START)
+
+    def test_menu_intent(self) -> None:
+        intent = router.interpret_intent("show menu")
+        self.assertEqual(intent.intent, intents.IntentType.MENU)
+
+    def test_tool_intent(self) -> None:
+        intent = router.interpret_intent("what can you do")
+        self.assertEqual(intent.intent, intents.IntentType.TOOL)
+
+    def test_email_intent(self) -> None:
+        intent = router.interpret_intent("set my email to you@example.com")
+        self.assertEqual(intent.intent, intents.IntentType.EMAIL)
+        self.assertEqual(intent.email, "you@example.com")
+
+    def test_verify_intent(self) -> None:
+        intent = router.interpret_intent("verify 123456")
+        self.assertEqual(intent.intent, intents.IntentType.VERIFY)
+        self.assertEqual(intent.otp, "123456")
+
+    def test_cancel_intent(self) -> None:
+        intent = router.interpret_intent("cancel")
+        self.assertEqual(intent.intent, intents.IntentType.CANCEL)
+
+    def test_logout_intent(self) -> None:
+        intent = router.interpret_intent("log out")
+        self.assertEqual(intent.intent, intents.IntentType.LOGOUT)
+
+    def test_zip_intent(self) -> None:
+        intent = router.interpret_intent("zip all dbms notes")
+        self.assertEqual(intent.intent, intents.IntentType.ZIP)
+        self.assertTrue(intent.bulk)
+
+    def test_mkdir_intent(self) -> None:
+        intent = router.interpret_intent("create folder called DBMS")
+        self.assertEqual(intent.intent, intents.IntentType.MKDIR)
+        self.assertEqual(intent.target_name, "DBMS")
+
+    def test_favorite_intent(self) -> None:
+        intent = router.interpret_intent("favorite this file")
+        self.assertEqual(intent.intent, intents.IntentType.FAVORITE)
+
+    def test_unfavorite_intent(self) -> None:
+        intent = router.interpret_intent("remove favorite")
+        self.assertEqual(intent.intent, intents.IntentType.UNFAVORITE)
+
+    def test_recent_intent(self) -> None:
+        intent = router.interpret_intent("show recent files")
+        self.assertEqual(intent.intent, intents.IntentType.RECENT)
+
+    def test_share_intent(self) -> None:
+        intent = router.interpret_intent("share this file")
+        self.assertEqual(intent.intent, intents.IntentType.SHARE)
+
+    def test_copy_intent(self) -> None:
+        intent = router.interpret_intent("duplicate this file")
+        self.assertEqual(intent.intent, intents.IntentType.COPY)
+
+    def test_bulk_delete_intent(self) -> None:
+        intent = router.interpret_intent("delete all temporary files")
+        self.assertEqual(intent.intent, intents.IntentType.DELETE)
+        self.assertTrue(intent.bulk)
+
+    def test_bulk_download_intent(self) -> None:
+        intent = router.interpret_intent("download all module 2 notes")
+        self.assertEqual(intent.intent, intents.IntentType.DOWNLOAD)
+        self.assertTrue(intent.bulk)
+
 
 if __name__ == "__main__":
     unittest.main()

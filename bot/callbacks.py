@@ -130,7 +130,7 @@ async def _require_stepup(uid: int, action_label: str, query, update, context) -
             ui.stepup_resend_keyboard(action_label),
         )
         return False
-    await _reply(query, update, formatter.error("Verification required.", "Use /verify <code>"))
+    await _reply(query, update, formatter.error("Verification required.", "Reply with the 6-digit code."))
     return False
 
 
@@ -203,7 +203,7 @@ async def _send_browse(uid: int, query, update) -> None:
                 await _reply(query, update, formatter.login_required())
                 return
         await _reply(query, update, formatter.error(
-            "Could not load directory.", "Try again or use /start."
+            "Could not load directory.", "Try again or say \"connect my drive\"."
         ))
 
 

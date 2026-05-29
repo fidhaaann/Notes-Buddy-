@@ -143,7 +143,7 @@ def email_setup_prompt() -> str:
         "\n"
         "Set your email to receive threat notifications.\n"
         "Reply with your email now (e.g. you@example.com)\n"
-        "or use /email you@example.com\n"
+        "or say \"set my email to you@example.com\"\n"
         "\n"
         "This helps protect your Drive from unusual activity."
     )
@@ -154,7 +154,7 @@ def login_required() -> str:
         "🔒 Not Authenticated\n"
         "\n"
         "You need to connect your Google account first.\n"
-        "Use /start to begin authentication."
+        "Say \"connect my drive\" to begin."
     )
 
 
@@ -194,7 +194,7 @@ def directory_listing(
         lines.append("  This directory is empty.")
         lines.append("")
         lines.append("  Send any file to upload it here,")
-        lines.append("  or use /cd to navigate elsewhere.")
+        lines.append("  or say \"go back\" to navigate elsewhere.")
         return "\n".join(lines)
 
     # Collect folder indices and file indices
@@ -230,9 +230,9 @@ def directory_listing(
         lines.append("")
 
     lines.append("─" * 34)
-    lines.append("  /cd <n>  enter   /download <n>")
-    lines.append("  /more <n>  info  /delete <n>")
-    lines.append("  /cd  go back")
+    lines.append("  say \"open 2\"   say \"download 3\"")
+    lines.append("  say \"details 3\" or \"delete 3\"")
+    lines.append("  say \"go back\"")
 
     return "\n".join(lines)
 
@@ -367,7 +367,7 @@ def stepup_email_required(action: str) -> str:
         "\n"
         f"  To {action}, set your email first.\n"
         "  Reply with your email now (e.g. you@example.com)\n"
-        "  or use /email you@example.com\n"
+        "  or say \"set my email to you@example.com\"\n"
         "\n"
         "  This protects your account from unauthorized actions."
     )
@@ -381,7 +381,6 @@ def stepup_code_sent(action: str, email: str, ttl: int) -> str:
         f"  {email}\n"
         "\n"
         "  Reply with the 6-digit code\n"
-        "  or use /verify <code>\n"
         f"  Code expires in {ttl} minutes."
     )
 
@@ -394,7 +393,6 @@ def stepup_code_pending(action: str, email: str, retry_after: int) -> str:
         f"  {email}\n"
         "\n"
         "  Reply with the 6-digit code\n"
-        "  or use /verify <code>\n"
         f"  You can request a new code in {retry_after} seconds."
     )
 
@@ -459,7 +457,7 @@ def upload_mode_enabled() -> str:
         "  Send a document, image, or video to upload.\n"
         "  It will be saved to your current directory.\n"
         "\n"
-        "  Type /cancel to exit upload mode."
+        "  Say \"cancel\" to exit upload mode."
     )
 
 
@@ -493,7 +491,7 @@ def search_results(keyword: str, files: List[Dict]) -> str:
             f"\n"
             f"  No items matched \"{keyword}\".\n"
             f"\n"
-            f"  Suggestion: Try a different keyword or use /info."
+            f"  Suggestion: Try a different keyword or say \"show what's inside\"."
         )
 
     lines = [f"🔍 Results for \"{keyword}\"", ""]
@@ -511,7 +509,7 @@ def search_results_indexed(keyword: str, index_map: dict[str, IndexedItem]) -> s
             f"\n"
             f"  No items matched.\n"
             f"\n"
-            f"  Suggestion: Try a different keyword or use /info."
+            f"  Suggestion: Try a different keyword or say \"show what's inside\"."
         )
 
     lines = [f"🔍 Search Results for \"{keyword}\"", ""]
@@ -524,7 +522,68 @@ def search_results_indexed(keyword: str, index_map: dict[str, IndexedItem]) -> s
     
     lines.append("")
     lines.append("─" * 34)
-    lines.append("  /download <n>  /more <n>")
+    lines.append("  say \"download 2\" or \"details 2\"")
+    return "\n".join(lines)
+
+
+def favorites_results(index_map: dict[str, IndexedItem]) -> str:
+    if not index_map:
+        return (
+            "⭐ No Favorites Yet\n"
+            "\n"
+            "  Mark a file as favorite to see it here."
+        )
+    lines = ["⭐ Favorites", ""]
+    for idx in sorted(index_map.keys(), key=lambda x: int(x)):
+        item = index_map[idx]
+        icon = _file_icon(item.mime_type)
+        lines.append(f"  [{idx}]  {icon} {item.name}")
+    lines.append("")
+    lines.append("─" * 34)
+    lines.append("  say \"download 2\" or \"details 2\"")
+    return "\n".join(lines)
+
+
+def recent_results(index_map: dict[str, IndexedItem]) -> str:
+    if not index_map:
+        return (
+            "🕒 No Recent Files\n"
+            "\n"
+            "  Open or download files to populate this list."
+        )
+    lines = ["🕒 Recent Files", ""]
+    for idx in sorted(index_map.keys(), key=lambda x: int(x)):
+        item = index_map[idx]
+        icon = _file_icon(item.mime_type)
+        lines.append(f"  [{idx}]  {icon} {item.name}")
+    lines.append("")
+    lines.append("─" * 34)
+    lines.append("  say \"download 2\" or \"details 2\"")
+    return "\n".join(lines)
+
+
+def share_link(filename: str, link: str) -> str:
+    return (
+        "🔗 Share Link Ready\n"
+        "\n"
+        f"  📄 {filename}\n"
+        f"  Link: {link}"
+    )
+
+
+def bulk_confirm(action: str, count: int, preview: list[str]) -> str:
+    lines = [
+        f"⚠️ Confirm {action}",
+        "",
+        f"  Items: {count}",
+    ]
+    if preview:
+        lines.append("")
+        lines.append("  Preview:")
+        for name in preview:
+            lines.append(f"   • {name}")
+    lines.append("")
+    lines.append("  This action cannot be undone.")
     return "\n".join(lines)
 
 
@@ -582,7 +641,7 @@ def task_failed(action: str) -> str:
     return (
         f"❌ {action} Failed\n"
         "\n"
-        "  Please try again or use /help."
+        "  Please try again or ask for help."
     )
 
 
@@ -630,42 +689,16 @@ def current_path(path: str) -> str:
 
 def tools_menu() -> str:
     return (
-        "🛠️ Keywords & Abilities\n"
+        "🛠️ What I can do\n"
         "\n"
-        "Natural language\n"
+        "Examples\n"
         "  show my dbms notes\n"
         "  download the second one\n"
         "  open ai folder\n"
+        "  create a folder called DBMS\n"
+        "  move this to semester 4\n"
         "\n"
-        "Navigation\n"
-        "  /info         List current directory\n"
-        "  /cd <n>       Enter folder by index\n"
-        "  /cd           Go back one level\n"
-        "  /pwd          Show current path\n"
-        "\n"
-        "File Operations\n"
-        "  /download <n> Download file by index\n"
-        "  /more <n>     View file metadata\n"
-        "  /search <q>   Search all files\n"
-        "  /index        Index current folder\n"
-        "  /upload       Enter upload mode\n"
-        "  /zip <q>      Download matching files as ZIP\n"
-        "\n"
-        "Management\n"
-        "  /rename <n> <new>     Rename by index\n"
-        "  /delete <n>           Delete by index\n"
-        "  /move <f> <d>         Move file to folder by index\n"
-        "  /mkdir <name>         Create folder\n"
-        "\n"
-        "Account\n"
-        "  /logout       Disconnect Google Drive\n"
-        "  /email <addr> Set email for security alerts\n"
-        "  /verify <otp> Confirm a sensitive action\n"
-        "  /clear        Clear chat messages\n"
-        "\n"
-        "Help\n"
-        "  /help         Show this guide\n"
-        "  /tool         Show this guide\n"
+        "You can also use short commands if you prefer."
     )
 
 
@@ -694,8 +727,19 @@ def nlp_no_results(query: str) -> str:
         "\n"
         f"  Query: {query}\n"
         "\n"
-        "Try browsing with /info or say \"index this folder\"."
+        "Try browsing this folder or say \"index this folder\"."
     )
+
+
+def nlp_action_suggestions(examples: list[str]) -> str:
+    lines = [
+        "🤔 I'm not fully sure what you want.",
+        "",
+        "Try one of these:",
+    ]
+    for example in examples[:5]:
+        lines.append(f"  • {example}")
+    return "\n".join(lines)
 
 
 def nlp_ambiguous_action() -> str:

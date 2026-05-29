@@ -173,7 +173,7 @@ async def _require_stepup(update: Update, context: ContextTypes.DEFAULT_TYPE, ac
             reply_markup=ui.stepup_resend_keyboard(action_label),
         )
         return False
-    await _msg(update).reply_text(formatter.error("Verification required.", "Use /verify <code>"))
+    await _msg(update).reply_text(formatter.error("Verification required.", "Reply with the 6-digit code."))
     return False
 
 
@@ -305,7 +305,7 @@ async def cmd_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await _msg(update).reply_text(
             formatter.error(
                 "Could not load directory listing.",
-                "Try again or use /start to re-authenticate.",
+                "Try again or say \"connect my drive\" to re-authenticate.",
             )
         )
 
@@ -343,7 +343,7 @@ async def cmd_cd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await _msg(update).reply_text(
             formatter.error(
                 "Invalid index.",
-                "Use numbers like: /cd 1, /cd 2",
+                "Use numbers like 1 or 2.",
             )
         )
         return
@@ -354,7 +354,7 @@ async def cmd_cd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await _msg(update).reply_text(
             formatter.error(
                 f"Invalid selection [{index}].",
-                "Use /info to see the current directory listing.",
+                "Say \"show what's inside\" to refresh the list.",
             )
         )
         return
@@ -363,7 +363,7 @@ async def cmd_cd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await _msg(update).reply_text(
             formatter.error(
                 f"[{index}] is a file, not a directory.",
-                "Use /download or /more for file operations.",
+                "Say \"download 2\" or \"details 2\" for files.",
             )
         )
         return
@@ -426,7 +426,7 @@ async def cmd_download(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await _msg(update).reply_text(
             formatter.error(
                 "Missing index.",
-                "Usage: /download <index>  (e.g. /download 1)",
+                "Try: download 1.",
             )
         )
         return
@@ -438,7 +438,7 @@ async def cmd_download(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await _msg(update).reply_text(
             formatter.error(
                 "Invalid index.",
-                "Use numbers like: /download 1, /download 2",
+                "Use numbers like 1 or 2.",
             )
         )
         return
@@ -453,14 +453,14 @@ async def cmd_download(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             await _msg(update).reply_text(
                 formatter.error(
                     f"Invalid selection [{index}].",
-                    f"Please choose a valid item (1-{max_idx}). Use /info or /search to see available items.",
+                    f"Please choose a valid item (1-{max_idx}). Say \"show what's inside\" or \"search for <keyword>\".",
                 )
             )
         else:
             await _msg(update).reply_text(
                 formatter.error(
                     "No active view.",
-                    "Use /info to browse or /search to search.",
+                    "Say \"show what's inside\" or \"search for <keyword>\".",
                 )
             )
         return
@@ -469,7 +469,7 @@ async def cmd_download(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await _msg(update).reply_text(
             formatter.error(
                 f"[{index}] is a folder.",
-                "Use /cd to enter it, or /zip to download its contents.",
+                "Say \"open 2\" to enter it, or \"zip all files\" to download its contents.",
             )
         )
         return
@@ -485,7 +485,7 @@ async def cmd_download(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                         "⛔ Unusual Activity Detected",
                         "Your Google Drive access has been suspended for security.\n\n"
                         "Check your email and Telegram for alerts.\n"
-                        "Use /login to reconnect when ready.",
+                        "Say \"connect my drive\" to reconnect when ready.",
                     )
                 )
                 return
@@ -561,7 +561,7 @@ async def cmd_more(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await _msg(update).reply_text(
             formatter.error(
                 "Invalid index.",
-                "Use numbers like: /more 1, /more 2",
+                "Use numbers like 1 or 2.",
             )
         )
         return
@@ -572,7 +572,7 @@ async def cmd_more(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await _msg(update).reply_text(
             formatter.error(
                 f"Index [{index}] not found.",
-                "Use /info to see the current directory listing.",
+                "Say \"show what's inside\" to refresh the list.",
             )
         )
         return
@@ -642,7 +642,7 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await _msg(update).reply_text(
             formatter.error(
                 "Missing keyword.",
-                "Usage: /search <keyword>",
+                "Try: search for <keyword>.",
             )
         )
         return
@@ -738,7 +738,7 @@ async def cmd_rename(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     args = p.parse_args(_text(update), "/rename")
     if len(args) < 2:
         await _msg(update).reply_text(
-            formatter.error("Missing arguments.", "Usage: /rename <index> <new_name>")
+            formatter.error("Missing arguments.", "Try: rename 2 to <new name>.")
         )
         return
     index, new_name = args[0].strip(), " ".join(args[1:])
@@ -746,7 +746,7 @@ async def cmd_rename(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await _msg(update).reply_text(
             formatter.error(
                 "Invalid index format.",
-                "Use indices like 1, 1.2, or 1.2.3 from the /info listing.",
+                "Use indices like 1, 1.2, or 1.2.3 from the current list.",
             )
         )
         return
@@ -756,7 +756,7 @@ async def cmd_rename(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             await _msg(update).reply_text(
                 formatter.error(
                     f"Index [{index}] not found.",
-                    "Use /info to see the current directory listing.",
+                    "Say \"show what's inside\" to refresh the list.",
                 )
             )
             return
@@ -794,7 +794,7 @@ async def cmd_move(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     args = p.parse_args(_text(update), "/move")
     if len(args) < 2:
         await _msg(update).reply_text(
-            formatter.error("Missing arguments.", "Usage: /move <file_index> <folder_index>")
+            formatter.error("Missing arguments.", "Try: move 2 to 5.")
         )
         return
     file_index, folder_index = args[0].strip(), args[1].strip()
@@ -802,7 +802,7 @@ async def cmd_move(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await _msg(update).reply_text(
             formatter.error(
                 "Invalid index format.",
-                "Use indices like 1, 1.2, or 1.2.3 from the /info listing.",
+                "Use indices like 1, 1.2, or 1.2.3 from the current list.",
             )
         )
         return
@@ -812,7 +812,7 @@ async def cmd_move(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await _msg(update).reply_text(
                 formatter.error(
                     f"Index [{file_index}] not found.",
-                    "Use /info to see the current directory listing.",
+                    "Say \"show what's inside\" to refresh the list.",
                 )
             )
             return
@@ -821,7 +821,7 @@ async def cmd_move(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await _msg(update).reply_text(
                 formatter.error(
                     f"Index [{folder_index}] not found.",
-                    "Use /info to see the current directory listing.",
+                    "Say \"show what's inside\" to refresh the list.",
                 )
             )
             return
@@ -829,7 +829,7 @@ async def cmd_move(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await _msg(update).reply_text(
                 formatter.error(
                     f"[{folder_index}] is not a folder.",
-                    "Choose a folder index from /info.",
+                    "Choose a folder index from the current list.",
                 )
             )
             return
@@ -879,7 +879,7 @@ async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     args = p.parse_args(_text(update), "/delete")
     if not args:
         await _msg(update).reply_text(
-            formatter.error("Missing index.", "Usage: /delete <index>  (e.g. /delete 3)")
+            formatter.error("Missing index.", "Try: delete 3.")
         )
         return
     target = args[0].strip()
@@ -890,7 +890,7 @@ async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 await _msg(update).reply_text(
                     formatter.error(
                         f"Index [{target}] not found.",
-                        "Use /info to see the current directory listing.",
+                        "Say \"show what's inside\" to refresh the list.",
                     )
                 )
                 return
@@ -898,7 +898,7 @@ async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 await _msg(update).reply_text(
                     formatter.error(
                         f"[{target}] is a folder.",
-                        "Use /cd to enter it, or delete files inside it.",
+                        "Say \"open 2\" to enter it, or delete files inside it.",
                     )
                 )
                 return
@@ -912,7 +912,7 @@ async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await _msg(update).reply_text(
             formatter.error(
                 "Invalid index format.",
-                "Use /info and delete by index like /delete 3.",
+                "Say \"show what's inside\" and delete by number like \"delete 3\".",
             )
         )
     except PermissionError:
@@ -937,7 +937,7 @@ async def cmd_mkdir(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     args = p.parse_args(_text(update), "/mkdir")
     if not args:
         await _msg(update).reply_text(
-            formatter.error("Missing name.", "Usage: /mkdir <folder_name>")
+            formatter.error("Missing name.", "Try: create folder <name>.")
         )
         return
     name = " ".join(args)
@@ -1236,7 +1236,7 @@ async def cmd_verify(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     if not args:
         await _msg(update).reply_text(
-            formatter.error("Missing code.", "Usage: /verify <6-digit code>")
+            formatter.error("Missing code.", "Reply with the 6-digit code.")
         )
         return
 

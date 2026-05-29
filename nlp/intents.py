@@ -8,6 +8,9 @@ from typing import Optional
 
 
 class IntentType(str, Enum):
+    START = "start"
+    LOGIN = "login"
+    LOGOUT = "logout"
     BROWSE = "browse"
     OPEN_FOLDER = "open_folder"
     BACK = "back"
@@ -19,6 +22,20 @@ class IntentType(str, Enum):
     DELETE = "delete"
     RENAME = "rename"
     MOVE = "move"
+    COPY = "copy"
+    SHARE = "share"
+    ZIP = "zip"
+    MKDIR = "mkdir"
+    FAVORITE = "favorite"
+    UNFAVORITE = "unfavorite"
+    FAVORITES = "favorites"
+    RECENT = "recent"
+    MENU = "menu"
+    TOOL = "tool"
+    EMAIL = "email"
+    VERIFY = "verify"
+    CANCEL = "cancel"
+    CLEAR = "clear"
     INDEX = "index"
     HELP = "help"
     UNKNOWN = "unknown"
@@ -32,4 +49,8 @@ class Intent:
     query: Optional[str] = None
     index: Optional[str] = None
     target_name: Optional[str] = None
+    email: Optional[str] = None
+    otp: Optional[str] = None
     needs_confirmation: bool = False
+    bulk: bool = False
+    action: Optional[str] = None

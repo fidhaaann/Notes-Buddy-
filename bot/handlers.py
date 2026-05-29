@@ -94,26 +94,25 @@ async def handle_file_upload(update, context) -> None:
     if not doc and not video and not photo:
         return
 
-    # Check authentication first
-    from bot.commands import _is_authenticated
-    if not _is_authenticated(uid):
-        await update.message.reply_text(formatter.login_required())
-        return
-
     if _RATE_LIMITER.limited(uid, "upload"):
         await update.message.reply_text(
             formatter.error("Please wait before uploading again.")
         )
+        return
+    # Check authentication
+    from bot.commands import _is_authenticated
+    if not _is_authenticated(uid):
+        await update.message.reply_text(formatter.login_required())
         return
 
     # Resolve NLP upload target if provided
     target_folder_id = None
     target_name = context.user_data.get("pending_upload_target")
     if target_name:
-        view = nav.get_active_view(uid)
+        view = await nlp_router._ensure_folder_view(uid)
         if not view:
             await update.message.reply_text(
-                formatter.error("No folder list available.", "Use /info first.")
+                formatter.error("No folders found here.", "Say \"show what's inside\" to refresh the list.")
             )
             return
         folder_items = {item.name: item for item in view.index_map.values() if item.is_folder}
@@ -204,7 +203,7 @@ async def handle_file_upload(update, context) -> None:
                 )
             else:
                 await update.message.reply_text(
-                    formatter.error("Verification required.", "Use /verify <code>")
+                    formatter.error("Verification required.", "Reply with the 6-digit code.")
                 )
             return
         tg_file = await context.bot.get_file(file_id)
@@ -250,12 +249,8 @@ async def handle_text_input(update, context) -> None:
     uid = update.effective_user.id
     monitoring_context.set_request_context(user_id=uid, request_id=str(update.update_id), operation="text")
     text = update.message.text.strip()
-
-    # Require authentication for guided flows
     from bot.commands import _is_authenticated
-    if not _is_authenticated(uid):
-        await update.message.reply_text(formatter.login_required())
-        return
+    is_authenticated = _is_authenticated(uid)
 
     if context.user_data.get("awaiting_email"):
         if not validators.validate_email(text):
@@ -363,7 +358,7 @@ async def handle_text_input(update, context) -> None:
         return
 
     # Passive email capture after login (if user replies with an email)
-    if validators.validate_email(text) and not models.get_user_email(uid):
+    if is_authenticated and validators.validate_email(text) and not models.get_user_email(uid):
         if models.set_user_email(uid, text):
             await update.message.reply_text(
                 f"✅ Email updated\n\n"
@@ -377,6 +372,10 @@ async def handle_text_input(update, context) -> None:
         return
 
     if await nlp_router.handle_nlp_message(update, context):
+        return
+
+    if not is_authenticated:
+        await update.message.reply_text(formatter.login_required())
         return
 
 

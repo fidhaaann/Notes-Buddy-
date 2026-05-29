@@ -19,6 +19,9 @@ MAX_ZIP_BYTES = int(os.environ.get("MAX_ZIP_BYTES", str(100 * 1024 * 1024)))
 # Search limits
 MAX_SEARCH_LEN = int(os.environ.get("MAX_SEARCH_LEN", "100"))
 MAX_FTS_RESULTS = int(os.environ.get("MAX_FTS_RESULTS", "25"))
+MAX_BULK_ITEMS = int(os.environ.get("MAX_BULK_ITEMS", "10"))
+MAX_RECENT_ITEMS = int(os.environ.get("MAX_RECENT_ITEMS", "15"))
+MAX_FAVORITES_ITEMS = int(os.environ.get("MAX_FAVORITES_ITEMS", "20"))
 
 # Task limits
 TASK_WORKERS = int(os.environ.get("TASK_WORKERS", "2"))

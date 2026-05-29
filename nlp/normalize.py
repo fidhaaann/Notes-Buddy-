@@ -22,6 +22,18 @@ _ABBREV_MAP = {
     "uplod": "upload",
     "upld": "upload",
     "dl": "download",
+    "fav": "favorite",
+    "favs": "favorites",
+    "favz": "favorites",
+    "sem": "semester",
+    "sem4": "semester 4",
+    "sem5": "semester 5",
+    "sem6": "semester 6",
+    "signin": "login",
+    "signout": "logout",
+    "cncl": "cancel",
+    "vrfy": "verify",
+    "eml": "email",
 }
 
 _ORDINALS = {
@@ -38,6 +50,9 @@ _ORDINALS = {
 }
 
 _ACTION_KEYWORDS = [
+    "start",
+    "login",
+    "logout",
     "download",
     "upload",
     "search",
@@ -57,6 +72,23 @@ _ACTION_KEYWORDS = [
     "remove",
     "rename",
     "move",
+    "copy",
+    "duplicate",
+    "share",
+    "zip",
+    "compress",
+    "archive",
+    "favorite",
+    "favorites",
+    "recent",
+    "mkdir",
+    "create",
+    "folder",
+    "menu",
+    "tool",
+    "email",
+    "verify",
+    "cancel",
     "help",
 ]
 
@@ -86,6 +118,18 @@ def best_action_token(text: str) -> tuple[str | None, float]:
     if not match:
         return None, 0.0
     return match[0], float(match[1])
+
+
+def action_candidates(text: str, limit: int = 3) -> list[tuple[str, float]]:
+    if not text:
+        return []
+    matches = process.extract(
+        text,
+        _ACTION_KEYWORDS,
+        scorer=fuzz.WRatio,
+        limit=limit,
+    )
+    return [(match[0], float(match[1])) for match in matches if match]
 
 
 def extract_index(text: str) -> str | None:

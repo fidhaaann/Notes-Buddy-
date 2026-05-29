@@ -436,7 +436,7 @@ def get_file_metadata(telegram_id: int, file_id: str) -> dict:
         raise ValueError("Invalid file reference.")
     request = svc.files().get(
         fileId=file_id,
-        fields="id, name, mimeType, size, createdTime, modifiedTime, parents, webViewLink, webContentLink, shortcutDetails",
+        fields="id, name, mimeType, size, createdTime, modifiedTime, parents, webViewLink, webContentLink, shortcutDetails, capabilities(canShare)",
         supportsAllDrives=True,
     )
     return _execute_with_retry(request)
@@ -460,6 +460,54 @@ def move_file(telegram_id: int, file_id: str, new_parent_id: str) -> dict:
     result = _execute_with_retry(request)
     log_audit(telegram_id, "move", file_id, f"to parent={new_parent_id}")
     return result
+
+
+def copy_file(
+    telegram_id: int,
+    file_id: str,
+    new_parent_id: str | None = None,
+    new_name: str | None = None,
+) -> dict:
+    svc = _service(telegram_id)
+    if not validators.validate_drive_id(file_id, allow_root=False):
+        raise ValueError("Invalid file reference.")
+    meta = get_file_metadata(telegram_id, file_id)
+    source_name = meta.get("name") or "Copy"
+    safe_name = _sanitize_filename(new_name or f"Copy of {source_name}")
+    body: dict = {"name": safe_name}
+    if new_parent_id:
+        parent_ref = _resolve_parent_for_write(new_parent_id)
+        body["parents"] = [parent_ref]
+    request = svc.files().copy(
+        fileId=file_id,
+        body=body,
+        fields="id, name, parents",
+        supportsAllDrives=True,
+    )
+    result = _execute_with_retry(request)
+    log_audit(telegram_id, "copy", file_id, f"new_name={safe_name}")
+    return result
+
+
+def create_share_link(telegram_id: int, file_id: str, role: str = "reader") -> dict:
+    svc = _service(telegram_id)
+    if not validators.validate_drive_id(file_id, allow_root=False):
+        raise ValueError("Invalid file reference.")
+    permission = {
+        "type": "anyone",
+        "role": role,
+        "allowFileDiscovery": False,
+    }
+    request = svc.permissions().create(
+        fileId=file_id,
+        body=permission,
+        fields="id",
+        supportsAllDrives=True,
+    )
+    _execute_with_retry(request)
+    meta = get_file_metadata(telegram_id, file_id)
+    log_audit(telegram_id, "share", file_id, f"role={role}")
+    return meta
 
 
 def create_folder(telegram_id: int, name: str, parent_id: str = "root") -> dict:
@@ -625,6 +673,10 @@ async def search_files_async(telegram_id: int, keyword: str) -> list[dict]:
     return await asyncio.to_thread(search_files, telegram_id, keyword)
 
 
+async def get_recent_files_async(telegram_id: int, limit: int = 10) -> list[dict]:
+    return await asyncio.to_thread(get_recent_files, telegram_id, limit)
+
+
 async def get_file_metadata_async(telegram_id: int, file_id: str) -> dict:
     return await asyncio.to_thread(get_file_metadata, telegram_id, file_id)
 
@@ -643,6 +695,19 @@ async def rename_file_async(telegram_id: int, file_id: str, new_name: str) -> di
 
 async def move_file_async(telegram_id: int, file_id: str, new_parent_id: str) -> dict:
     return await asyncio.to_thread(move_file, telegram_id, file_id, new_parent_id)
+
+
+async def copy_file_async(
+    telegram_id: int,
+    file_id: str,
+    new_parent_id: str | None = None,
+    new_name: str | None = None,
+) -> dict:
+    return await asyncio.to_thread(copy_file, telegram_id, file_id, new_parent_id, new_name)
+
+
+async def create_share_link_async(telegram_id: int, file_id: str, role: str = "reader") -> dict:
+    return await asyncio.to_thread(create_share_link, telegram_id, file_id, role)
 
 
 async def delete_file_async(telegram_id: int, file_id: str) -> None:
