@@ -10,6 +10,7 @@ A professional, terminal-inspired Telegram bot for managing Google Drive files. 
 - **Hierarchical Browsing** — View your Drive structure with indexed items (`[1]`, `[1.1]`, `[2]`, etc.)
 - **Terminal-Style Traversal** — Navigate with `/cd`, `/pwd`, `/info` like a file system
 - **Session Tracking** — Persistent path state with LRU eviction and 24-hour TTL
+- **Natural Language** — Use phrases like "show my dbms notes" or "download the second one"
 
 ### File Operations
 - **Index-Based Actions** — Download, view metadata, and enter folders using their displayed index
@@ -42,6 +43,7 @@ A professional, terminal-inspired Telegram bot for managing Google Drive files. 
 | `/download <n>` | Download file by index |
 | `/more <n>` | View detailed file metadata |
 | `/search <q>` | Search all files by keyword |
+| `/index` | Index files in the current folder |
 | `/upload` | Enter upload mode (documents/images/videos) |
 | `/zip <q>` | Download matching files as ZIP |
 | `/rename <n> <new>` | Rename by index |
@@ -75,6 +77,8 @@ Notes-Buddy/
 ├── services/
 │   ├── zip_service.py   # In-memory archive creation
 │   └── parser.py        # Input processing helpers
+├── nlp/                 # Natural language intent detection & routing
+├── indexing/            # Content extraction + FTS5 indexing
 ├── security/            # Validation, limits, rate-limiting, upload checks
 ├── storage/             # Per-user temp sandboxes
 ├── tasks/               # Background job queue (downloads/ZIPs)
@@ -123,6 +127,7 @@ Notes-Buddy/
 1. **Clone:** `git clone https://github.com/fidhaaann/Notes-Buddy-`
 2. **Install:** `pip install -r requirements.txt`
    **Security tools (dev/CI):** `pip install -r requirements-dev.txt`
+3. **Optional OCR:** Install Tesseract and set `TESSERACT_CMD` if not on PATH
 3. **Credentials:** Place `credentials.json` from Google Cloud Console in the root (or set `GOOGLE_CLIENT_ID` + `GOOGLE_CLIENT_SECRET` env vars)
 4. **Environment:** Create `.env` from `.env.example` — set `TELEGRAM_BOT_TOKEN`, `OAUTH_REDIRECT_URI`, and `TOKEN_ENCRYPTION_KEY`
 5. **Run:** `python main.py`
@@ -136,7 +141,7 @@ Notes-Buddy/
 - [x] Professional UX redesign
 - [x] Security audit & hardening (PKCE, audit logging, token revocation)
 - [x] Shared Drive support
-- [ ] Natural language search
+- [x] Natural language search
 - [ ] Multi-account switching
 - [ ] Chunked streaming for large uploads
 
