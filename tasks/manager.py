@@ -24,9 +24,10 @@ class TaskJob:
     job_id: str
     task_type: str
     telegram_id: int
-    chat_id: int
-    message_id: int
+    chat_id: int | None
+    message_id: int | None
     payload: dict
+    notify: bool = True
 
 
 class TaskManager:
@@ -77,6 +78,7 @@ class TaskManager:
                 chat_id=chat_id,
                 message_id=message.message_id,
                 payload={"file_id": file_id, "filename": filename},
+                notify=True,
             )
         )
         return job_id
@@ -96,6 +98,23 @@ class TaskManager:
                 chat_id=chat_id,
                 message_id=message.message_id,
                 payload={"keyword": keyword},
+                notify=True,
+            )
+        )
+        return job_id
+
+    async def enqueue_index(self, telegram_id: int, file_id: str) -> str:
+        job_id = uuid.uuid4().hex
+        models.create_task_job(job_id, telegram_id, "index", f"file_id={file_id}")
+        await self._queue.put(
+            TaskJob(
+                job_id=job_id,
+                task_type="index",
+                telegram_id=telegram_id,
+                chat_id=None,
+                message_id=None,
+                payload={"file_id": file_id},
+                notify=False,
             )
         )
         return job_id
@@ -118,6 +137,8 @@ class TaskManager:
                     await self._run_download(job)
                 elif job.task_type == "zip":
                     await self._run_zip(job)
+                elif job.task_type == "index":
+                    await self._run_index(job)
                 else:
                     raise ValueError("Unknown task type.")
                 models.update_task_job(job.job_id, status="completed", progress=100, detail="done")
@@ -148,6 +169,8 @@ class TaskManager:
                 self._queue.task_done()
 
     async def _update_message(self, job: TaskJob, text: str) -> None:
+        if not job.notify or not job.chat_id or not job.message_id:
+            return
         try:
             await self._bot.edit_message_text(
                 chat_id=job.chat_id,
@@ -200,6 +223,14 @@ class TaskManager:
             await self._update_message(job, formatter.task_complete("ZIP", zip_name))
         finally:
             sandbox.remove_file(path)
+
+    async def _run_index(self, job: TaskJob) -> None:
+        from indexing import indexer
+
+        file_id = job.payload.get("file_id", "")
+        if not file_id:
+            raise ValueError("Invalid file reference.")
+        await asyncio.to_thread(indexer.index_drive_file, job.telegram_id, file_id)
 
     @staticmethod
     def _build_zip_payload(telegram_id: int, keyword: str) -> tuple[bytes, str, int]:

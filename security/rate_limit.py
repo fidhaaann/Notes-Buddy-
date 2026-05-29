@@ -67,6 +67,7 @@ def default_rate_limiter() -> RateLimiter:
         "rename": RateLimitPolicy(1.5, 60, 20),
         "move": RateLimitPolicy(1.5, 60, 20),
         "mkdir": RateLimitPolicy(1.5, 60, 20),
+        "index": RateLimitPolicy(5.0, 300, 5),
     }
     return RateLimiter(default_policy, per_action)
 
