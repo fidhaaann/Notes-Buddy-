@@ -34,6 +34,8 @@ from services import stepup_auth
 from db import models
 from monitoring import context as monitoring_context
 from monitoring import timing
+from indexing import indexer
+from indexing import search as indexed_search
 from security import limits, validators
 from security.rate_limit import get_rate_limiter
 from tasks.manager import get_task_manager
@@ -253,6 +255,17 @@ async def cmd_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
             folders = listing.folders
             files = listing.files
+
+            for item in files:
+                indexer.upsert_metadata(
+                    uid,
+                    item.get("id", ""),
+                    item.get("name", "file"),
+                    item.get("mimeType"),
+                    fid,
+                    int(item.get("size") or 0) if item.get("size") else None,
+                    None,
+                )
 
             index_map = nav.build_flat_index_map(uid, folders, files)
             
@@ -643,17 +656,47 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     try:
         with timing.timed("cmd_search"):
-            files = await ds.search_files_async(uid, keyword)
+            files = indexed_search.search_index(uid, keyword)
+            if not files:
+                suggestions = indexed_search.suggest_files(uid, keyword)
+                if suggestions:
+                    labels = [s["name"] for s in suggestions]
+                    index_map: dict[str, nav.IndexedItem] = {}
+                    for i, s in enumerate(suggestions, 1):
+                        idx = str(i)
+                        index_map[idx] = nav.IndexedItem(
+                            id=s["file_id"],
+                            name=s["name"],
+                            mime_type=s.get("mime_type", ""),
+                            is_folder=False,
+                            parent_index="",
+                            full_index=idx,
+                            is_shortcut=False,
+                            shortcut_target_id=None,
+                            shortcut_target_mime_type=None,
+                            path="Suggestions",
+                        )
+                    nav.set_active_view(uid, "search_suggestions", index_map, metadata={"keyword": keyword})
+                    await _msg(update).reply_text(
+                        formatter.nlp_suggestions("Closest Matches", labels),
+                        reply_markup=ui.back_to_menu_keyboard(),
+                    )
+                    return
+                await _msg(update).reply_text(
+                    formatter.nlp_no_results(keyword),
+                    reply_markup=ui.back_to_menu_keyboard(),
+                )
+                return
 
             # Build proper IndexedItem objects for search results
             index_map: dict[str, nav.IndexedItem] = {}
             for i, f in enumerate(files, 1):
                 idx = str(i)
                 index_map[idx] = nav.IndexedItem(
-                    id=f["id"],
+                    id=f["file_id"],
                     name=f["name"],
-                    mime_type=f.get("mimeType", ""),
-                    is_folder="folder" in f.get("mimeType", "").lower(),
+                    mime_type=f.get("mime_type", ""),
+                    is_folder=False,
                     parent_index="",
                     full_index=idx,
                     is_shortcut=False,
@@ -717,9 +760,16 @@ async def cmd_rename(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 )
             )
             return
-        updated = await ds.rename_file_async(uid, item.id, new_name)
+        assert context.user_data is not None
+        context.user_data["pending_action"] = {
+            "intent": "rename",
+            "file_id": item.id,
+            "name": item.name,
+            "index": index,
+            "new_name": new_name,
+        }
         await _msg(update).reply_text(
-            formatter.success("Renamed", updated['name']),
+            formatter.confirm_action("Rename", item.name),
             reply_markup=ui.back_to_menu_keyboard(),
         )
     except PermissionError:
@@ -794,9 +844,17 @@ async def cmd_move(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 )
                 return
             dest_id = dest_item.shortcut_target_id
-        await ds.move_file_async(uid, file_item.id, dest_id)
+        assert context.user_data is not None
+        context.user_data["pending_action"] = {
+            "intent": "move",
+            "file_id": file_item.id,
+            "name": file_item.name,
+            "index": file_index,
+            "dest_id": dest_id,
+            "dest_name": dest_item.name,
+        }
         await _msg(update).reply_text(
-            formatter.success("Moved", file_item.name, dest_item.name),
+            formatter.confirm_action("Move", file_item.name),
             reply_markup=ui.back_to_menu_keyboard(),
         )
     except PermissionError:
@@ -895,6 +953,66 @@ async def cmd_mkdir(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.exception("cmd_mkdir error")
         await _msg(update).reply_text(
             formatter.error("Could not create folder.", "Try a different name.")
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# /index — Index current folder for NLP search
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def cmd_index(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = _uid(update)
+    if not _is_authenticated(uid):
+        await _msg(update).reply_text(formatter.login_required())
+        return
+    if _check_rate_limit(uid, "index"):
+        await _msg(update).reply_text(
+            formatter.error("Please wait before indexing again.")
+        )
+        return
+
+    manager = get_task_manager(context)
+    if not manager:
+        await _msg(update).reply_text(
+            formatter.error("Background queue unavailable.", "Try again later.")
+        )
+        return
+
+    try:
+        fid = nav.current_folder_id(uid)
+        listing = await ds.list_directory_async(uid, parent_id=fid)
+        count = 0
+        for item in listing.files:
+            file_id = item.get("id")
+            if not file_id:
+                continue
+            indexer.upsert_metadata(
+                uid,
+                file_id,
+                item.get("name", "file"),
+                item.get("mimeType"),
+                fid,
+                int(item.get("size") or 0) if item.get("size") else None,
+                None,
+            )
+            await manager.enqueue_index(uid, file_id)
+            count += 1
+
+        if count == 0:
+            await _msg(update).reply_text(
+                formatter.error("No files to index in this folder.")
+            )
+            return
+        await _msg(update).reply_text(
+            formatter.success("Indexing Started", f"{count} files"),
+            reply_markup=ui.back_to_menu_keyboard(),
+        )
+    except PermissionError:
+        await _msg(update).reply_text(formatter.login_required())
+    except Exception:
+        logger.exception("cmd_index error")
+        await _msg(update).reply_text(
+            formatter.error("Indexing failed.", "Try again later.")
         )
 
 

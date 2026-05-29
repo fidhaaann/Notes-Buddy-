@@ -161,6 +161,22 @@ def init_db() -> None:
                 created_at    TEXT DEFAULT (datetime('now')),
                 updated_at    TEXT DEFAULT (datetime('now'))
             );
+
+            CREATE TABLE IF NOT EXISTS file_index (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_id   INTEGER NOT NULL,
+                file_id       TEXT NOT NULL,
+                name          TEXT NOT NULL,
+                mime_type     TEXT,
+                parent_id     TEXT,
+                size_bytes    INTEGER,
+                modified_time TEXT,
+                content_hash  TEXT,
+                keywords      TEXT,
+                aliases       TEXT,
+                indexed_at    TEXT DEFAULT (datetime('now')),
+                UNIQUE (telegram_id, file_id)
+            );
             """
         )
         # ── Schema migrations for existing databases ──────────────────────────
@@ -247,6 +263,42 @@ def init_db() -> None:
                 """
             )
             logger.info("Created task_jobs table.")
+
+        if "file_index" not in tables:
+            conn.execute(
+                """
+                CREATE TABLE file_index (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    telegram_id   INTEGER NOT NULL,
+                    file_id       TEXT NOT NULL,
+                    name          TEXT NOT NULL,
+                    mime_type     TEXT,
+                    parent_id     TEXT,
+                    size_bytes    INTEGER,
+                    modified_time TEXT,
+                    content_hash  TEXT,
+                    keywords      TEXT,
+                    aliases       TEXT,
+                    indexed_at    TEXT DEFAULT (datetime('now')),
+                    UNIQUE (telegram_id, file_id)
+                )
+                """
+            )
+            logger.info("Created file_index table.")
+
+        # FTS5 virtual table for indexed content (sqlite has FTS5 enabled by default on Python builds)
+        conn.execute(
+            """
+            CREATE VIRTUAL TABLE IF NOT EXISTS file_fts USING fts5(
+                telegram_id UNINDEXED,
+                file_id UNINDEXED,
+                name,
+                content,
+                keywords,
+                aliases
+            )
+            """
+        )
     _restrict_db_permissions()
     if _fernet:
         logger.info("Token encryption enabled.")
@@ -609,6 +661,124 @@ def cleanup_task_jobs(ttl_seconds: int) -> None:
             (f"-{ttl_seconds} seconds",),
         )
 
+
+# ── File indexing helpers ──────────────────────────────────────────────────────
+
+def upsert_file_index(
+    telegram_id: int,
+    file_id: str,
+    name: str,
+    mime_type: str | None = None,
+    parent_id: str | None = None,
+    size_bytes: int | None = None,
+    modified_time: str | None = None,
+    content_hash: str | None = None,
+    keywords: str | None = None,
+    aliases: str | None = None,
+) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO file_index (
+                telegram_id, file_id, name, mime_type, parent_id, size_bytes,
+                modified_time, content_hash, keywords, aliases
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(telegram_id, file_id) DO UPDATE SET
+                name = excluded.name,
+                mime_type = excluded.mime_type,
+                parent_id = excluded.parent_id,
+                size_bytes = excluded.size_bytes,
+                modified_time = excluded.modified_time,
+                content_hash = excluded.content_hash,
+                keywords = excluded.keywords,
+                aliases = excluded.aliases,
+                indexed_at = datetime('now')
+            """,
+            (
+                telegram_id,
+                file_id,
+                name,
+                mime_type,
+                parent_id,
+                size_bytes,
+                modified_time,
+                content_hash,
+                keywords,
+                aliases,
+            ),
+        )
+
+
+def upsert_file_fts(
+    telegram_id: int,
+    file_id: str,
+    name: str,
+    content: str,
+    keywords: str,
+    aliases: str,
+) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            "DELETE FROM file_fts WHERE telegram_id = ? AND file_id = ?",
+            (telegram_id, file_id),
+        )
+        conn.execute(
+            """
+            INSERT INTO file_fts (telegram_id, file_id, name, content, keywords, aliases)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (telegram_id, file_id, name, content, keywords, aliases),
+        )
+
+
+def search_file_fts(telegram_id: int, query: str, limit: int = 25) -> list[dict]:
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT i.file_id, i.name, i.mime_type, i.parent_id, i.size_bytes,
+                   bm25(file_fts, 1.0, 0.6, 0.4, 0.3) AS rank
+            FROM file_fts
+            JOIN file_index i
+              ON i.file_id = file_fts.file_id AND i.telegram_id = file_fts.telegram_id
+            WHERE file_fts MATCH ? AND file_fts.telegram_id = ?
+            ORDER BY rank ASC
+            LIMIT ?
+            """,
+            (query, telegram_id, limit),
+        ).fetchall()
+    return [
+        {
+            "file_id": row["file_id"],
+            "name": row["name"],
+            "mime_type": row["mime_type"],
+            "parent_id": row["parent_id"],
+            "size_bytes": row["size_bytes"],
+            "rank": row["rank"],
+        }
+        for row in rows
+    ]
+
+
+def list_indexed_files(telegram_id: int) -> list[dict]:
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT file_id, name, mime_type, parent_id, size_bytes
+            FROM file_index WHERE telegram_id = ?
+            """,
+            (telegram_id,),
+        ).fetchall()
+    return [
+        {
+            "file_id": row["file_id"],
+            "name": row["name"],
+            "mime_type": row["mime_type"],
+            "parent_id": row["parent_id"],
+            "size_bytes": row["size_bytes"],
+        }
+        for row in rows
+    ]
 
 # ── Anomaly detection helpers ──────────────────────────────────────────────────
 

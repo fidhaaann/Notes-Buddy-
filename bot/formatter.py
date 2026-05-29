@@ -74,7 +74,12 @@ def welcome_unauthenticated() -> str:
     return (
         "🔐 Authentication Required\n"
         "\n"
-        "Please log in to connect your Google Drive account."
+        "Please log in to connect your Google Drive account.\n"
+        "\n"
+        "Examples:\n"
+        "  show my dbms notes\n"
+        "  open ai folder\n"
+        "  where am i"
     )
 
 
@@ -103,7 +108,11 @@ def welcome_authenticated() -> str:
         "  • Upload files\n"
         "  • Search items\n"
         "  • Navigate directories\n"
-        "  • Generate ZIP archives"
+        "  • Generate ZIP archives\n"
+        "\n"
+        "Try natural language:\n"
+        "  show my dbms notes\n"
+        "  download the second one"
     )
 
 
@@ -119,7 +128,12 @@ def login_successful() -> str:
         "  • Upload files\n"
         "  • Search items\n"
         "  • Navigate directories\n"
-        "  • Generate ZIP archives"
+        "  • Generate ZIP archives\n"
+        "\n"
+        "Examples:\n"
+        "  show my dbms notes\n"
+        "  find module 2 pdf\n"
+        "  open ai folder"
     )
 
 
@@ -618,6 +632,11 @@ def tools_menu() -> str:
     return (
         "🛠️ Keywords & Abilities\n"
         "\n"
+        "Natural language\n"
+        "  show my dbms notes\n"
+        "  download the second one\n"
+        "  open ai folder\n"
+        "\n"
         "Navigation\n"
         "  /info         List current directory\n"
         "  /cd <n>       Enter folder by index\n"
@@ -628,6 +647,7 @@ def tools_menu() -> str:
         "  /download <n> Download file by index\n"
         "  /more <n>     View file metadata\n"
         "  /search <q>   Search all files\n"
+        "  /index        Index current folder\n"
         "  /upload       Enter upload mode\n"
         "  /zip <q>      Download matching files as ZIP\n"
         "\n"
@@ -646,6 +666,43 @@ def tools_menu() -> str:
         "Help\n"
         "  /help         Show this guide\n"
         "  /tool         Show this guide\n"
+    )
+
+
+def nlp_clarify(prompt: str) -> str:
+    return (
+        "🤔 Clarification\n"
+        "\n"
+        f"  {prompt}\n"
+        "\n"
+        "Reply with a number or a short instruction."
+    )
+
+
+def nlp_suggestions(title: str, items: list[str]) -> str:
+    lines = [f"🔍 {title}", ""]
+    for i, item in enumerate(items, 1):
+        lines.append(f"  [{i}]  {item}")
+    lines.append("")
+    lines.append("Reply with 1, 2, 3 or say \"download 2\".")
+    return "\n".join(lines)
+
+
+def nlp_no_results(query: str) -> str:
+    return (
+        "🔍 No Indexed Results\n"
+        "\n"
+        f"  Query: {query}\n"
+        "\n"
+        "Try browsing with /info or say \"index this folder\"."
+    )
+
+
+def nlp_ambiguous_action() -> str:
+    return (
+        "🤔 I can do that, but I need a bit more detail.\n"
+        "\n"
+        "Try: \"download the first one\" or \"open the ai folder\"."
     )
 
 

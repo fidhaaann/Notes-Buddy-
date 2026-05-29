@@ -35,6 +35,7 @@ from tasks.manager import get_task_manager
 from storage import sandbox
 from monitoring import context as monitoring_context
 from monitoring import timing
+from indexing import indexer
 
 logger = logging.getLogger(__name__)
 _RATE_LIMITER = get_rate_limiter()
@@ -156,6 +157,17 @@ async def _send_browse(uid: int, query, update) -> None:
 
             folders = listing.folders
             files = listing.files
+
+            for item in files:
+                indexer.upsert_metadata(
+                    uid,
+                    item.get("id", ""),
+                    item.get("name", "file"),
+                    item.get("mimeType"),
+                    fid,
+                    int(item.get("size") or 0) if item.get("size") else None,
+                    None,
+                )
 
             index_map = nav.build_flat_index_map(uid, folders, files)
             
@@ -498,6 +510,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                         safe_name,
                         parent_id=fid,
                     )
+                    manager = get_task_manager(context)
+                    if manager:
+                        await manager.enqueue_index(uid, uploaded["id"])
                     await _reply(
                         query, update,
                         formatter.upload_success(uploaded["name"], nav.breadcrumb(uid)),

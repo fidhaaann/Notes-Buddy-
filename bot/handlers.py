@@ -46,6 +46,7 @@ from bot.commands import (
     cmd_email,
     cmd_verify,
     cmd_clear,
+    cmd_index,
 )
 from bot.callbacks import handle_callback
 from bot.errors import handle_error
@@ -55,6 +56,9 @@ from services import stepup_auth
 from security import limits, validators
 from security import uploads
 from security.rate_limit import get_rate_limiter
+from rapidfuzz import process, fuzz
+from nlp import router as nlp_router
+from tasks.manager import get_task_manager
 from storage import sandbox
 from monitoring import context as monitoring_context
 
@@ -101,6 +105,28 @@ async def handle_file_upload(update, context) -> None:
             formatter.error("Please wait before uploading again.")
         )
         return
+
+    # Resolve NLP upload target if provided
+    target_folder_id = None
+    target_name = context.user_data.get("pending_upload_target")
+    if target_name:
+        view = nav.get_active_view(uid)
+        if not view:
+            await update.message.reply_text(
+                formatter.error("No folder list available.", "Use /info first.")
+            )
+            return
+        folder_items = {item.name: item for item in view.index_map.values() if item.is_folder}
+        match = process.extractOne(target_name, folder_items.keys(), scorer=fuzz.WRatio)
+        if not match or match[1] < 70:
+            await update.message.reply_text(
+                formatter.nlp_suggestions("Closest Folders", list(folder_items.keys())[:5])
+            )
+            return
+        item = folder_items.get(match[0])
+        if item:
+            target_folder_id = item.shortcut_target_id if item.is_shortcut and item.shortcut_target_id else item.id
+            context.user_data.pop("pending_upload_target", None)
 
     # Validate file size before downloading (defense in depth)
     file_size = None
@@ -193,9 +219,12 @@ async def handle_file_upload(update, context) -> None:
 
         # Direct upload (no confirmation)
         await update.message.reply_text(formatter.processing("Uploading"))
-        fid = nav.current_folder_id(uid)
+        fid = target_folder_id or nav.current_folder_id(uid)
         try:
             uploaded = await upload_file_async(uid, bytes(file_bytes), safe_filename, parent_id=fid)
+            manager = get_task_manager(context)
+            if manager:
+                await manager.enqueue_index(uid, uploaded["id"])
             await update.message.reply_text(
                 formatter.upload_success(uploaded["name"], nav.breadcrumb(uid)),
                 reply_markup=ui.post_login_keyboard(),
@@ -285,20 +314,6 @@ async def handle_text_input(update, context) -> None:
         )
         return
 
-    # Passive email capture after login (if user replies with an email)
-    if validators.validate_email(text) and not models.get_user_email(uid):
-        if models.set_user_email(uid, text):
-            await update.message.reply_text(
-                f"✅ Email updated\n\n"
-                f"Address: {text}\n\n"
-                "You will receive security alerts at this email if suspicious activity is detected."
-            )
-        else:
-            await update.message.reply_text(
-                formatter.error("Failed to update email.", "Please try again later.")
-            )
-        return
-
     if context.user_data.get("awaiting_otp"):
         if not (text.isdigit() and len(text) == 6):
             await update.message.reply_text(
@@ -342,6 +357,27 @@ async def handle_text_input(update, context) -> None:
         await update.message.reply_text(
             formatter.error("No active verification.", "Retry the action to get a new code.")
         )
+        return
+
+    if await nlp_router.handle_pending_action(update, context):
+        return
+
+    # Passive email capture after login (if user replies with an email)
+    if validators.validate_email(text) and not models.get_user_email(uid):
+        if models.set_user_email(uid, text):
+            await update.message.reply_text(
+                f"✅ Email updated\n\n"
+                f"Address: {text}\n\n"
+                "You will receive security alerts at this email if suspicious activity is detected."
+            )
+        else:
+            await update.message.reply_text(
+                formatter.error("Failed to update email.", "Please try again later.")
+            )
+        return
+
+    if await nlp_router.handle_nlp_message(update, context):
+        return
 
 
 def register_handlers(app: Application) -> None:
@@ -372,6 +408,7 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("move",     cmd_move))
     app.add_handler(CommandHandler("delete",   cmd_delete))
     app.add_handler(CommandHandler("mkdir",    cmd_mkdir))
+    app.add_handler(CommandHandler("index",    cmd_index))
     app.add_handler(CommandHandler("create_folder", cmd_mkdir))  # alias
     app.add_handler(CommandHandler("zip",      cmd_zip))
 
