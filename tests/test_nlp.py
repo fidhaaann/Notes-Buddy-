@@ -97,6 +97,11 @@ class TestNlpIntent(unittest.TestCase):
         self.assertEqual(intent.intent, intents.IntentType.DOWNLOAD)
         self.assertTrue(intent.bulk)
 
+    def test_bulk_move_these_files(self) -> None:
+        intent = router.interpret_intent("move these files to semester 4")
+        self.assertEqual(intent.intent, intents.IntentType.MOVE)
+        self.assertTrue(intent.bulk)
+
 
 if __name__ == "__main__":
     unittest.main()

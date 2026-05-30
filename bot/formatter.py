@@ -72,14 +72,18 @@ def _file_type_label(mime_type: str) -> str:
 
 def welcome_unauthenticated() -> str:
     return (
-        "🔐 Authentication Required\n"
+        "Welcome to NotesBuddy.\n"
         "\n"
-        "Please log in to connect your Google Drive account.\n"
+        "Your AI-powered Google Drive assistant.\n"
+        "\n"
+        "You can simply tell me what you need.\n"
         "\n"
         "Examples:\n"
         "  show my dbms notes\n"
-        "  open ai folder\n"
-        "  where am i"
+        "  find module 2 pdf\n"
+        "  upload this to notes\n"
+        "  create a folder called projects\n"
+        "  open semester 4"
     )
 
 
@@ -98,42 +102,43 @@ def oauth_scope_warning() -> str:
 
 def welcome_authenticated() -> str:
     return (
-        "✅ Welcome Back\n"
+        "Google Drive Connected Successfully.\n"
         "\n"
-        "NotesBuddy is connected to your Google Drive.\n"
+        "What would you like to do?\n"
         "\n"
-        "Capabilities:\n"
-        "  • Browse folders\n"
-        "  • Download files\n"
-        "  • Upload files\n"
-        "  • Search items\n"
-        "  • Navigate directories\n"
-        "  • Generate ZIP archives\n"
+        "Quick Actions:\n"
+        "  • Browse Files\n"
+        "  • Search Notes\n"
+        "  • Upload File\n"
+        "  • Recent Files\n"
+        "  • Help\n"
         "\n"
-        "Try natural language:\n"
+        "Examples:\n"
         "  show my dbms notes\n"
-        "  download the second one"
+        "  open ai folder\n"
+        "  find normalization pdf\n"
+        "  upload this to semester 4"
     )
 
 
 def login_successful() -> str:
     return (
-        "✅ Login Successful\n"
+        "Google Drive Connected Successfully.\n"
         "\n"
-        "NotesBuddy is now connected to your Google Drive.\n"
+        "What would you like to do?\n"
         "\n"
-        "Capabilities:\n"
-        "  • Browse folders\n"
-        "  • Download files\n"
-        "  • Upload files\n"
-        "  • Search items\n"
-        "  • Navigate directories\n"
-        "  • Generate ZIP archives\n"
+        "Quick Actions:\n"
+        "  • Browse Files\n"
+        "  • Search Notes\n"
+        "  • Upload File\n"
+        "  • Recent Files\n"
+        "  • Help\n"
         "\n"
         "Examples:\n"
         "  show my dbms notes\n"
-        "  find module 2 pdf\n"
-        "  open ai folder"
+        "  open ai folder\n"
+        "  find normalization pdf\n"
+        "  upload this to semester 4"
     )
 
 
@@ -153,8 +158,8 @@ def login_required() -> str:
     return (
         "🔒 Not Authenticated\n"
         "\n"
-        "You need to connect your Google account first.\n"
-        "Say \"connect my drive\" to begin."
+        "Connect your Google account to continue.\n"
+        "Tap \"Login with Google\" or say \"connect my drive\"."
     )
 
 
@@ -693,10 +698,12 @@ def tools_menu() -> str:
         "\n"
         "Examples\n"
         "  show my dbms notes\n"
-        "  download the second one\n"
-        "  open ai folder\n"
-        "  create a folder called DBMS\n"
-        "  move this to semester 4\n"
+        "  find module 2 pdf\n"
+        "  upload this to notes\n"
+        "  create a folder called projects\n"
+        "  move these files to semester 4\n"
+        "  send the normalization notes\n"
+        "  zip all ai notes\n"
         "\n"
         "You can also use short commands if you prefer."
     )
@@ -751,7 +758,18 @@ def nlp_ambiguous_action() -> str:
 
 
 def main_menu() -> str:
-    return "📌 Main Menu\n\nSelect an option below."
+    return (
+        "Google Drive Connected Successfully.\n"
+        "\n"
+        "What would you like to do?\n"
+        "\n"
+        "Quick Actions:\n"
+        "  • Browse Files\n"
+        "  • Search Notes\n"
+        "  • Upload File\n"
+        "  • Recent Files\n"
+        "  • Help"
+    )
 
 
 def already_home() -> str:

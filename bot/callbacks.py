@@ -207,6 +207,36 @@ async def _send_browse(uid: int, query, update) -> None:
         ))
 
 
+async def _send_recent(uid: int, query, update) -> None:
+    """Fetch recent files and send as a new message."""
+    try:
+        recent = await ds.get_recent_files_async(uid, limit=limits.MAX_RECENT_ITEMS)
+        if not recent:
+            await _reply(query, update, formatter.recent_results({}), ui.back_to_menu_keyboard())
+            return
+        index_map: dict[str, nav.IndexedItem] = {}
+        for i, item in enumerate(recent, 1):
+            idx = str(i)
+            index_map[idx] = nav.IndexedItem(
+                id=item.get("id", ""),
+                name=item.get("name", "file"),
+                mime_type=item.get("mimeType", ""),
+                is_folder=False,
+                parent_index="",
+                full_index=idx,
+                path="Recent",
+            )
+        nav.set_active_view(uid, "recent", index_map)
+        await _reply(
+            query,
+            update,
+            formatter.recent_results(index_map),
+            ui.back_to_menu_keyboard(),
+        )
+    except Exception:
+        logger.exception("_send_recent error")
+        await _reply(query, update, formatter.error("Could not load recent files."))
+
 # ── main dispatcher ───────────────────────────────────────────────────────────
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -264,7 +294,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         elif action == "search":
             await _reply(
                 query, update,
-                "🔍 Search\n\n  Send your query:\n  /search <keyword>",
+                "🔍 Search\n\nSend your query in plain language.\nExample: show my dbms notes",
                 ui.back_to_menu_keyboard(),
             )
 
@@ -274,7 +304,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 return
             assert context.user_data is not None
             context.user_data["upload_mode"] = True
-            await _reply(query, update, formatter.upload_mode_enabled())
+            await _reply(
+                query,
+                update,
+                "📤 Upload File\n\nSend a document, image, or video to upload.\n"
+                "Tip: say \"upload this to notes\" to set a target folder.",
+            )
 
         elif action == "login":
             from drive import auth as drive_auth
@@ -306,10 +341,23 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 ui.back_to_menu_keyboard(),
             )
 
+        elif action == "help":
+            await _reply(
+                query, update,
+                formatter.tools_menu(),
+                ui.back_to_menu_keyboard(),
+            )
+
+        elif action == "recent":
+            if not _is_authenticated(uid):
+                await _reply(query, update, formatter.login_required())
+                return
+            await _send_recent(uid, query, update)
+
         elif action == "mkdir":
             await _reply(
                 query, update,
-                "📁 Create Folder\n\n  Use the command:\n  /mkdir <folder_name>",
+                "📁 Create Folder\n\nSay: create a folder called projects",
                 ui.back_to_menu_keyboard(),
             )
 

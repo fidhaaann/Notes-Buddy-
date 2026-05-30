@@ -116,13 +116,20 @@ async def handle_file_upload(update, context) -> None:
             )
             return
         folder_items = {item.name: item for item in view.index_map.values() if item.is_folder}
-        match = process.extractOne(target_name, folder_items.keys(), scorer=fuzz.WRatio)
-        if not match or match[1] < 70:
+        matches = process.extract(target_name, folder_items.keys(), scorer=fuzz.WRatio, limit=5)
+        if not matches:
             await update.message.reply_text(
-                formatter.nlp_suggestions("Closest Folders", list(folder_items.keys())[:5])
+                formatter.error("No matching folder found.")
             )
             return
-        item = folder_items.get(match[0])
+        best_name, best_score, _ = matches[0]
+        second_score = matches[1][1] if len(matches) > 1 else 0
+        if best_score < 90 or (best_score - second_score) < 12:
+            await update.message.reply_text(
+                formatter.nlp_suggestions("Closest Folders", [m[0] for m in matches])
+            )
+            return
+        item = folder_items.get(best_name)
         if item:
             target_folder_id = item.shortcut_target_id if item.is_shortcut and item.shortcut_target_id else item.id
             context.user_data.pop("pending_upload_target", None)

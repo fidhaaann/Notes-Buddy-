@@ -51,7 +51,7 @@ _TOOL_KEYWORDS = {"tool", "tools", "abilities", "capabilities", "what can you do
 _EMAIL_KEYWORDS = {"email", "security email", "alert email", "set email"}
 _VERIFY_KEYWORDS = {"verify", "otp", "code", "verification"}
 _CANCEL_KEYWORDS = {"cancel", "stop", "abort", "never mind"}
-_BULK_KEYWORDS = {"all", "everything", "every", "all files", "all items"}
+_BULK_KEYWORDS = {"all", "everything", "every", "all files", "all items", "these", "those", "these files", "those files"}
 _REFERENCE_WORDS = {"this", "that", "it", "one", "file", "folder", "document", "image", "pdf"}
 _RECENT_REF_WORDS = {"recent", "latest", "newest"}
 
@@ -260,6 +260,29 @@ def _strip_action_words(text: str, extra: set[str] | None = None) -> str:
         stop.update(extra)
     tokens = [t for t in text.split() if t not in stop]
     return " ".join(tokens).strip()
+
+
+def _select_confident_match(
+    query: str,
+    candidates: dict[str, nav.IndexedItem],
+    min_score: int = 90,
+    min_gap: int = 12,
+) -> tuple[nav.IndexedItem | None, list[str]]:
+    if not query or not candidates:
+        return None, []
+    matches = process.extract(
+        query,
+        candidates.keys(),
+        scorer=fuzz.WRatio,
+        limit=5,
+    )
+    if not matches:
+        return None, []
+    best_name, best_score, _ = matches[0]
+    second_score = matches[1][1] if len(matches) > 1 else 0
+    if best_score >= min_score and (best_score - second_score) >= min_gap:
+        return candidates.get(best_name), [m[0] for m in matches]
+    return None, [m[0] for m in matches]
 
 
 def _suggest_action_examples(text: str) -> list[str]:
@@ -898,30 +921,22 @@ async def _handle_open_folder(update, context, intent: intent_types.Intent) -> N
         await _handle_browse(update, context)
         return
     target = intent.target_name or _strip_action_words(normalize.normalize_text(intent.raw_text), extra=_OPEN_KEYWORDS)
+    if not target:
+        await update.message.reply_text(formatter.nlp_clarify("Which folder should I open?"))
+        return
     candidates = await _folder_candidates(uid)
     if not candidates:
         await update.message.reply_text(
             formatter.error("No folders found here.", "Say \"show what's inside\" to refresh the list.")
         )
         return
-    matches = process.extract(
-        target,
-        candidates.keys(),
-        scorer=fuzz.WRatio,
-        limit=5,
-    )
-    if not matches:
-        await update.message.reply_text(formatter.error("No matching folder found."))
-        return
-    name, score, _ = matches[0]
-    item = candidates.get(name)
+    item, labels = _select_confident_match(target, candidates)
     if not item:
+        if labels:
+            await update.message.reply_text(formatter.nlp_suggestions("Closest Folders", labels))
+            _set_folder_suggestion_view(uid, [candidates[m] for m in labels if m in candidates])
+            return
         await update.message.reply_text(formatter.error("No matching folder found."))
-        return
-    if score < 70:
-        labels = [m[0] for m in matches]
-        await update.message.reply_text(formatter.nlp_suggestions("Closest Folders", labels))
-        _set_folder_suggestion_view(uid, [candidates[m[0]] for m in matches if m[0] in candidates])
         return
     if item.is_shortcut and item.shortcut_target_id:
         target_id = item.shortcut_target_id
@@ -954,24 +969,14 @@ async def _handle_download(update, context, intent: intent_types.Intent) -> None
                 formatter.error("Which file?", "Say 'download 1' or 'download the second one'.")
             )
             return
-        query = intent.query or intent.raw_text
-        matches = process.extract(
-            query,
-            candidates.keys(),
-            scorer=fuzz.WRatio,
-            limit=3,
-        )
-        if matches:
-            best_name, best_score, _ = matches[0]
-            second_score = matches[1][1] if len(matches) > 1 else 0
-            if best_score >= 85 and (best_score - second_score) >= 10:
-                item = candidates.get(best_name)
-                if item:
-                    await _download_item(update, context, item)
-                    return
-            labels = [m[0] for m in matches]
+        query = _strip_action_words(normalize.normalize_text(intent.raw_text))
+        item, labels = _select_confident_match(query, candidates)
+        if item:
+            await _download_item(update, context, item)
+            return
+        if labels:
             await update.message.reply_text(formatter.nlp_suggestions("Closest Files", labels))
-            _set_file_suggestion_view(uid, [candidates[m[0]] for m in matches if m[0] in candidates])
+            _set_file_suggestion_view(uid, [candidates[m] for m in labels if m in candidates])
             return
         await update.message.reply_text(
             formatter.error("Which file?", "Say 'download 1' or 'download the second one'.")
@@ -1170,11 +1175,10 @@ async def _handle_copy(update, context, intent: intent_types.Intent) -> None:
         if not candidates:
             await update.message.reply_text(formatter.error("No folders found here.", "Say \"show what's inside\" to refresh the list."))
             return
-        match = process.extractOne(target_name, candidates.keys(), scorer=fuzz.WRatio)
-        if not match or match[1] < 70:
-            await update.message.reply_text(formatter.nlp_suggestions("Closest Folders", list(candidates.keys())[:5]))
+        dest, labels = _select_confident_match(target_name, candidates)
+        if not dest:
+            await update.message.reply_text(formatter.nlp_suggestions("Closest Folders", labels or list(candidates.keys())[:5]))
             return
-        dest = candidates.get(match[0])
         if not dest:
             await update.message.reply_text(formatter.error("Destination not found."))
             return
@@ -1601,11 +1605,15 @@ async def _execute_pending_action(update, context, pending: dict) -> None:
                 await update.message.reply_text(formatter.error("Missing destination folder."))
                 return
             candidates = await _folder_candidates(uid)
-            match = process.extractOne(target_name, candidates.keys(), scorer=fuzz.WRatio) if candidates else None
-            if not match or match[1] < 70:
-                await update.message.reply_text(formatter.nlp_suggestions("Closest Folders", list(candidates.keys())[:5]))
+            if not candidates:
+                await update.message.reply_text(
+                    formatter.error("No folders found here.", "Say \"show what's inside\" to refresh the list.")
+                )
                 return
-            dest = candidates.get(match[0])
+            dest, labels = _select_confident_match(target_name, candidates)
+            if not dest:
+                await update.message.reply_text(formatter.nlp_suggestions("Closest Folders", labels or list(candidates.keys())[:5]))
+                return
             if not dest:
                 await update.message.reply_text(formatter.error("Destination not found."))
                 return
@@ -1652,11 +1660,10 @@ async def _execute_pending_action(update, context, pending: dict) -> None:
             if not candidates:
                 await update.message.reply_text(formatter.error("No folders found here.", "Say \"show what's inside\" to refresh the list."))
                 return
-            match = process.extractOne(target_name, candidates.keys(), scorer=fuzz.WRatio)
-            if not match or match[1] < 70:
-                await update.message.reply_text(formatter.nlp_suggestions("Closest Folders", list(candidates.keys())[:5]))
+            dest, labels = _select_confident_match(target_name, candidates)
+            if not dest:
+                await update.message.reply_text(formatter.nlp_suggestions("Closest Folders", labels or list(candidates.keys())[:5]))
                 return
-            dest = candidates.get(match[0])
             if not dest:
                 await update.message.reply_text(formatter.error("Destination not found."))
                 return
@@ -1671,11 +1678,10 @@ async def _execute_pending_action(update, context, pending: dict) -> None:
         dest_name = nav.current_folder_name(uid)
         if target_name:
             candidates = await _folder_candidates(uid)
-            match = process.extractOne(target_name, candidates.keys(), scorer=fuzz.WRatio) if candidates else None
-            if not match or match[1] < 70:
-                await update.message.reply_text(formatter.nlp_suggestions("Closest Folders", list(candidates.keys())[:5]))
+            dest, labels = _select_confident_match(target_name, candidates)
+            if not dest:
+                await update.message.reply_text(formatter.nlp_suggestions("Closest Folders", labels or list(candidates.keys())[:5]))
                 return
-            dest = candidates.get(match[0])
             if not dest:
                 await update.message.reply_text(formatter.error("Destination not found."))
                 return

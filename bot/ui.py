@@ -18,18 +18,18 @@ FOLDER_MIME = "application/vnd.google-apps.folder"
 def login_keyboard(auth_url: str) -> InlineKeyboardMarkup:
     """OAuth login button — opens URL directly, no raw link in chat."""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔗 Login with Google", url=auth_url)],
+        [InlineKeyboardButton("Login with Google", url=auth_url)],
     ])
 
 
 def post_login_keyboard() -> InlineKeyboardMarkup:
     """Main action keyboard shown after successful login."""
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📂 Browse",        callback_data="nav:browse"),
-         InlineKeyboardButton("⬆️ Upload",         callback_data="nav:upload")],
-        [InlineKeyboardButton("🔍 Search",         callback_data="nav:search"),
-         InlineKeyboardButton("📌 Current Path",   callback_data="nav:pwd")],
-        [InlineKeyboardButton("⚙️ More",            callback_data="nav:tools")],
+        [InlineKeyboardButton("Browse Files", callback_data="nav:browse"),
+         InlineKeyboardButton("Search Notes", callback_data="nav:search")],
+        [InlineKeyboardButton("Upload File", callback_data="nav:upload"),
+         InlineKeyboardButton("Recent Files", callback_data="nav:recent")],
+        [InlineKeyboardButton("Help", callback_data="nav:help")],
     ])
 
 
@@ -41,7 +41,7 @@ def start_keyboard(is_authenticated: bool, auth_url: str = "") -> InlineKeyboard
         return login_keyboard(auth_url)
     # Fallback: button that triggers login flow
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔗 Login with Google", callback_data="nav:login")],
+        [InlineKeyboardButton("Login with Google", callback_data="nav:login")],
     ])
 
 
@@ -49,12 +49,11 @@ def start_keyboard(is_authenticated: bool, auth_url: str = "") -> InlineKeyboard
 
 def main_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📂 Browse",        callback_data="nav:browse"),
-         InlineKeyboardButton("🔍 Search",         callback_data="nav:search")],
-        [InlineKeyboardButton("⬆️ Upload",         callback_data="nav:upload"),
-         InlineKeyboardButton("📌 Current Path",   callback_data="nav:pwd")],
-        [InlineKeyboardButton("⚙️ Commands",       callback_data="nav:tools"),
-         InlineKeyboardButton("🔓 Logout",         callback_data="nav:logout")],
+        [InlineKeyboardButton("Browse Files", callback_data="nav:browse"),
+         InlineKeyboardButton("Search Notes", callback_data="nav:search")],
+        [InlineKeyboardButton("Upload File", callback_data="nav:upload"),
+         InlineKeyboardButton("Recent Files", callback_data="nav:recent")],
+        [InlineKeyboardButton("Help", callback_data="nav:help")],
     ])
 
 
