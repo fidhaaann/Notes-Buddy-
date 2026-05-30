@@ -774,3 +774,78 @@ def main_menu() -> str:
 
 def already_home() -> str:
     return "You are already in the home page."
+
+
+# ── Copilot conversational templates ─────────────────────────────────────────
+
+def greeting_response(response_text: str) -> str:
+    """Format a greeting response from the copilot."""
+    return response_text
+
+
+def off_topic_response(topic: str, redirect_query: str = "") -> str:
+    """Gentle redirect for off-topic questions."""
+    lines = [
+        "I'm primarily a Google Drive assistant 📁",
+        "",
+    ]
+    if redirect_query:
+        lines.append(f"Would you like me to search your Drive for \"{redirect_query}\"?")
+    else:
+        lines.extend([
+            "I can help you with:",
+            "  • Finding and organizing files",
+            "  • Searching notes by topic",
+            "  • Uploading and downloading",
+            "  • Managing your Drive folders",
+            "",
+            "What would you like to do?",
+        ])
+    return "\n".join(lines)
+
+
+def copilot_clarify(prompt: str) -> str:
+    """Natural slot-filling clarification prompt."""
+    return f"🤔 {prompt}"
+
+
+def results_with_suggestions(
+    base_text: str,
+    suggestions: list[str],
+) -> str:
+    """Append predicted action suggestions to any response."""
+    if not suggestions:
+        return base_text
+    lines = [base_text, "", "─" * 34, ""]
+    lines.append("💡 Suggested Actions:")
+    for suggestion in suggestions[:4]:
+        lines.append(f"  • {suggestion}")
+    return "\n".join(lines)
+
+
+def copilot_not_found(query: str) -> str:
+    """Honest 'no results' response — never fakes results."""
+    return (
+        f"I couldn't find any files matching \"{query}\".\n"
+        f"\n"
+        f"  This could mean:\n"
+        f"  • The file doesn't exist in your Drive\n"
+        f"  • It may be in a folder I haven't indexed yet\n"
+        f"\n"
+        f"  Try:\n"
+        f"  • Browse your folders manually\n"
+        f"  • Say \"index this folder\" to build the search index\n"
+        f"  • Use different keywords"
+    )
+
+
+def copilot_error(reason: str) -> str:
+    """Honest error response for the copilot."""
+    return (
+        f"I couldn't complete that request.\n"
+        f"\n"
+        f"  {reason}\n"
+        f"\n"
+        f"Try rephrasing, or say \"help\" to see what I can do."
+    )
+
