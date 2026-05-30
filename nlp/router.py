@@ -652,31 +652,21 @@ def _resolve_folder_item(uid: int, user_data: dict, intent: intent_types.Intent)
     return None
 
 
-async def handle_nlp_message(update, context) -> bool:
-    if not update.message or not update.message.text:
+async def execute_intent(update, context, intent: intent_types.Intent) -> bool:
+    """Execute a resolved intent — called by both the copilot layer and the keyword fallback.
+
+    This is the single dispatch point for all intent execution. The copilot
+    layer (LLM) and the keyword router both produce an Intent dataclass,
+    then hand it here for validated execution.
+
+    Returns True if the intent was handled, False otherwise.
+    """
+    if not update.message:
         return False
     assert context.user_data is not None
     uid = update.effective_user.id
 
-    if nlp_context.is_expired(context.user_data):
-        nlp_context.clear_state(context.user_data)
-
-    text = update.message.text.strip()
-    intent = interpret_intent(text)
-    normalized = normalize.normalize_text(text)
-
-    if intent.intent == intent_types.IntentType.UNKNOWN or intent.confidence < _LOW_CONFIDENCE:
-        await update.message.reply_text(formatter.nlp_ambiguous_action())
-        return True
-
-    if intent.confidence < _MEDIUM_CONFIDENCE:
-        suggestions = _suggest_action_examples(normalized)
-        if suggestions:
-            await update.message.reply_text(formatter.nlp_action_suggestions(suggestions))
-        else:
-            await update.message.reply_text(formatter.nlp_ambiguous_action())
-        return True
-
+    # Auth gate — most intents require authentication
     if intent.intent not in {
         intent_types.IntentType.HELP,
         intent_types.IntentType.START,
@@ -686,6 +676,8 @@ async def handle_nlp_message(update, context) -> bool:
         intent_types.IntentType.MENU,
         intent_types.IntentType.TOOL,
         intent_types.IntentType.CANCEL,
+        intent_types.IntentType.GREETING,
+        intent_types.IntentType.OFF_TOPIC,
     }:
         if not models.get_user(uid):
             await update.message.reply_text(formatter.login_required())
@@ -813,6 +805,36 @@ async def handle_nlp_message(update, context) -> bool:
         return True
 
     return False
+
+
+async def handle_nlp_message(update, context) -> bool:
+    """Keyword-based NLP fallback — used when the copilot LLM is unavailable."""
+    if not update.message or not update.message.text:
+        return False
+    assert context.user_data is not None
+    uid = update.effective_user.id
+
+    if nlp_context.is_expired(context.user_data):
+        nlp_context.clear_state(context.user_data)
+
+    text = update.message.text.strip()
+    intent = interpret_intent(text)
+    normalized = normalize.normalize_text(text)
+
+    if intent.intent == intent_types.IntentType.UNKNOWN or intent.confidence < _LOW_CONFIDENCE:
+        await update.message.reply_text(formatter.nlp_ambiguous_action())
+        return True
+
+    if intent.confidence < _MEDIUM_CONFIDENCE:
+        suggestions = _suggest_action_examples(normalized)
+        if suggestions:
+            await update.message.reply_text(formatter.nlp_action_suggestions(suggestions))
+        else:
+            await update.message.reply_text(formatter.nlp_ambiguous_action())
+        return True
+
+    return await execute_intent(update, context, intent)
+
 
 
 async def _handle_login(update) -> None:
