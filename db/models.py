@@ -299,6 +299,39 @@ def init_db() -> None:
             )
             """
         )
+
+        # ── Copilot tables (user intelligence + conversation memory) ──────
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS user_behavior (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_id INTEGER NOT NULL,
+                action      TEXT NOT NULL,
+                target      TEXT,
+                target_name TEXT,
+                file_type   TEXT,
+                created_at  TEXT DEFAULT (datetime('now'))
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_behavior_user
+                ON user_behavior(telegram_id, created_at DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_behavior_action
+                ON user_behavior(telegram_id, action, created_at DESC);
+
+            CREATE TABLE IF NOT EXISTS conversation_turns (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_id INTEGER NOT NULL,
+                role        TEXT NOT NULL,
+                content     TEXT NOT NULL,
+                intent      TEXT,
+                created_at  TEXT DEFAULT (datetime('now'))
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_conv_user
+                ON conversation_turns(telegram_id, created_at DESC);
+            """
+        )
     _restrict_db_permissions()
     if _fernet:
         logger.info("Token encryption enabled.")
@@ -834,4 +867,118 @@ def cleanup_anomaly_tracking() -> None:
     with get_connection() as conn:
         conn.execute(
             "DELETE FROM anomaly_tracking WHERE window_start < datetime('now', '-24 hours')"
+        )
+
+
+# ── User behavior helpers (copilot intelligence) ──────────────────────────────
+
+def log_behavior(
+    telegram_id: int,
+    action: str,
+    target: str = "",
+    target_name: str = "",
+    file_type: str = "",
+) -> None:
+    """Record a user action for behavioral learning."""
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO user_behavior (telegram_id, action, target, target_name, file_type)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (telegram_id, action, target[:200], target_name[:200], file_type[:50]),
+        )
+
+
+def get_user_behavior(
+    telegram_id: int,
+    action: str,
+    limit: int = 50,
+) -> list[dict]:
+    """Get recent user behavior records for a specific action type."""
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT target, target_name, file_type, created_at
+            FROM user_behavior
+            WHERE telegram_id = ? AND action = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (telegram_id, action, limit),
+        ).fetchall()
+    return [
+        {
+            "target": row["target"],
+            "target_name": row["target_name"],
+            "file_type": row["file_type"],
+            "created_at": row["created_at"],
+        }
+        for row in rows
+    ]
+
+
+def cleanup_old_behavior(days: int = 90) -> None:
+    """Remove behavior records older than N days."""
+    with get_connection() as conn:
+        conn.execute(
+            "DELETE FROM user_behavior WHERE created_at < datetime('now', ?)",
+            (f"-{days} days",),
+        )
+
+
+# ── Conversation turn helpers (crash-recoverable session memory) ──────────────
+
+def save_conversation_turn(
+    telegram_id: int,
+    role: str,
+    content: str,
+    intent: str = "",
+) -> None:
+    """Save a conversation turn for potential crash recovery."""
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO conversation_turns (telegram_id, role, content, intent)
+            VALUES (?, ?, ?, ?)
+            """,
+            (telegram_id, role, content[:1000], intent[:50]),
+        )
+
+
+def get_recent_turns(
+    telegram_id: int,
+    limit: int = 20,
+) -> list[dict]:
+    """Get recent conversation turns for session recovery."""
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT role, content, intent, created_at
+            FROM conversation_turns
+            WHERE telegram_id = ?
+              AND created_at > datetime('now', '-1 hour')
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (telegram_id, limit),
+        ).fetchall()
+    # Return in chronological order
+    return [
+        {
+            "role": row["role"],
+            "content": row["content"],
+            "intent": row["intent"],
+            "created_at": row["created_at"],
+        }
+        for row in reversed(rows)
+    ]
+
+
+def cleanup_old_turns(hours: int = 6) -> None:
+    """Remove conversation turns older than N hours."""
+    with get_connection() as conn:
+        conn.execute(
+            "DELETE FROM conversation_turns WHERE created_at < datetime('now', ?)",
+            (f"-{hours} hours",),
         )
