@@ -38,3 +38,11 @@ NLP_CONTEXT_TTL_SECONDS = int(os.environ.get("NLP_CONTEXT_TTL_SECONDS", "900"))
 RATE_LIMIT_COOLDOWN_SECONDS = float(os.environ.get("RATE_LIMIT_COOLDOWN", "3"))
 RATE_LIMIT_WINDOW_SECONDS = int(os.environ.get("RATE_LIMIT_WINDOW", "60"))
 RATE_LIMIT_MAX_ACTIONS = int(os.environ.get("RATE_LIMIT_MAX_ACTIONS", "30"))
+
+# ── Copilot (AI layer) ───────────────────────────────────────────────────────
+COPILOT_ENABLED = os.environ.get("COPILOT_ENABLED", "true").lower() == "true"
+COPILOT_MEMORY_TURNS = int(os.environ.get("COPILOT_MEMORY_TURNS", "10"))
+COPILOT_MEMORY_TTL = int(os.environ.get("COPILOT_MEMORY_TTL", "900"))
+COPILOT_MAX_PROMPT_CHARS = 2000  # Max user message length sent to Gemini
+COPILOT_RATE_LIMIT_RPM = 14     # Stay under free tier 15 RPM
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
