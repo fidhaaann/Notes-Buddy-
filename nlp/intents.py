@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
 
@@ -38,6 +38,8 @@ class IntentType(str, Enum):
     CLEAR = "clear"
     INDEX = "index"
     HELP = "help"
+    GREETING = "greeting"
+    OFF_TOPIC = "off_topic"
     UNKNOWN = "unknown"
 
 
@@ -54,3 +56,7 @@ class Intent:
     needs_confirmation: bool = False
     bulk: bool = False
     action: Optional[str] = None
+    file_type_hint: Optional[str] = None
+    suggested_actions: list[str] = field(default_factory=list)
+    source: str = "keyword"  # "keyword" or "llm"
+

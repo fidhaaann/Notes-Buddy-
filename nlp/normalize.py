@@ -34,6 +34,27 @@ _ABBREV_MAP = {
     "cncl": "cancel",
     "vrfy": "verify",
     "eml": "email",
+    # Extended aliases for semantic file type understanding
+    "pics": "image",
+    "screenshots": "image",
+    "snaps": "image",
+    "recordings": "video",
+    "clips": "video",
+    "music": "audio",
+    "songs": "audio",
+    "slides": "presentation",
+    "deck": "presentation",
+    "excel": "spreadsheet",
+    "word": "document",
+    "powerpoint": "presentation",
+    "txt": "text",
+    "lab": "lab",
+    "prev": "previous",
+    "ques": "questions",
+    "qp": "question paper",
+    "hw": "homework",
+    "asgn": "assignment",
+    "assgn": "assignment",
 }
 
 _ORDINALS = {
