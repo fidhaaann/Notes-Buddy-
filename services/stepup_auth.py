@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 
 from db import models
 from services import email_service
+from services import alert_service
 
 OTP_LENGTH = 6
 OTP_TTL_MINUTES = 10
@@ -140,6 +141,26 @@ def verify_code(telegram_id: int, code: str) -> dict:
 
     if state.get("attempts", 0) >= MAX_ATTEMPTS:
         models.clear_stepup_code(telegram_id)
+        user_email = models.get_user_email(telegram_id)
+        models.log_security_alert(
+            telegram_id=telegram_id,
+            alert_type="otp_locked",
+            description="Maximum OTP attempts exceeded",
+            action_taken="OTP locked",
+        )
+        try:
+            import asyncio
+            loop = asyncio.get_running_loop()
+            loop.create_task(
+                alert_service.send_telegram_alert(
+                    telegram_id,
+                    "🛡 Security Alert\n\nToo many failed verification attempts. OTP has been locked.",
+                )
+            )
+        except Exception:
+            pass
+        if user_email and alert_service.email_alerts_enabled(telegram_id):
+            email_service.alert_failed_otp(telegram_id, user_email, MAX_ATTEMPTS)
         return {"status": "locked"}
 
     if hmac.compare_digest(state["code_hash"], _hash_code(code)):
@@ -151,5 +172,25 @@ def verify_code(telegram_id: int, code: str) -> dict:
     remaining = max(0, MAX_ATTEMPTS - attempts)
     if remaining <= 0:
         models.clear_stepup_code(telegram_id)
+        user_email = models.get_user_email(telegram_id)
+        models.log_security_alert(
+            telegram_id=telegram_id,
+            alert_type="otp_locked",
+            description="Maximum OTP attempts exceeded",
+            action_taken="OTP locked",
+        )
+        try:
+            import asyncio
+            loop = asyncio.get_running_loop()
+            loop.create_task(
+                alert_service.send_telegram_alert(
+                    telegram_id,
+                    "🛡 Security Alert\n\nToo many failed verification attempts. OTP has been locked.",
+                )
+            )
+        except Exception:
+            pass
+        if user_email and alert_service.email_alerts_enabled(telegram_id):
+            email_service.alert_failed_otp(telegram_id, user_email, MAX_ATTEMPTS)
         return {"status": "locked"}
     return {"status": "invalid", "remaining": remaining}

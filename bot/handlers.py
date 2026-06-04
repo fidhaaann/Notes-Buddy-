@@ -29,6 +29,7 @@ from bot.commands import (
     cmd_menu,
     cmd_help,
     cmd_tool,
+    cmd_security,
     cmd_info,
     cmd_cd,
     cmd_pwd,
@@ -58,6 +59,7 @@ from security import uploads
 from security.rate_limit import get_rate_limiter
 from rapidfuzz import process, fuzz
 from nlp import router as nlp_router
+from copilot import dialogue_manager
 from tasks.manager import get_task_manager
 from storage import sandbox
 from monitoring import context as monitoring_context
@@ -231,6 +233,8 @@ async def handle_file_upload(update, context) -> None:
             manager = get_task_manager(context)
             if manager:
                 await manager.enqueue_index(uid, uploaded["id"])
+            from copilot import user_profile
+            user_profile.log_upload(uid, uploaded.get("id", ""), uploaded.get("name", safe_filename), uploaded.get("mimeType", ""))
             await update.message.reply_text(
                 formatter.upload_success(uploaded["name"], nav.breadcrumb(uid)),
                 reply_markup=ui.post_login_keyboard(),
@@ -285,9 +289,9 @@ async def handle_text_input(update, context) -> None:
         if models.set_user_email(uid, text):
             context.user_data.pop("awaiting_email", None)
             await update.message.reply_text(
-                f"✅ Email updated\n\n"
+                f"✅ Email saved\n\n"
                 f"Address: {text}\n\n"
-                "You will receive security alerts at this email if suspicious activity is detected."
+                "This email will be used for verification codes."
             )
 
             pending_action = context.user_data.get("pending_stepup_action")
@@ -324,6 +328,28 @@ async def handle_text_input(update, context) -> None:
                     await update.message.reply_text(formatter.stepup_email_failed())
             return
 
+        await update.message.reply_text(
+            formatter.error("Failed to update email.", "Please try again later.")
+        )
+        return
+
+    if context.user_data.get("awaiting_security_email"):
+        if not validators.validate_email(text):
+            await update.message.reply_text(
+                formatter.error(
+                    "Invalid email format.",
+                    "Reply with a valid address like user@example.com",
+                )
+            )
+            return
+        if models.set_user_email(uid, text):
+            models.set_security_alerts(uid, telegram_enabled=True, email_enabled=True)
+            context.user_data.pop("awaiting_security_email", None)
+            await update.message.reply_text(
+                f"✅ Email alerts enabled\n\n"
+                f"Address: {text}"
+            )
+            return
         await update.message.reply_text(
             formatter.error("Failed to update email.", "Please try again later.")
         )
@@ -374,43 +400,13 @@ async def handle_text_input(update, context) -> None:
         )
         return
 
-    # ── Copilot: pending slot fill ────────────────────────────────────────
-    from copilot import slot_filler
-    if slot_filler.has_pending(context.user_data):
-        pending = slot_filler.get_pending_intent(context.user_data)
-        if pending:
-            entities = slot_filler.fill_pending_slot(pending, text)
-            slot_filler.clear_pending(context.user_data)
-            # Rebuild intent with filled slot and execute
-            from nlp.intents import IntentType, Intent
-            try:
-                intent_type = IntentType(pending["intent"])
-            except ValueError:
-                intent_type = IntentType.UNKNOWN
-            filled_intent = Intent(
-                intent=intent_type,
-                confidence=0.95,
-                raw_text=text,
-                query=entities.get("query"),
-                target_name=entities.get("folder_name") or entities.get("new_name") or entities.get("target_folder"),
-                email=entities.get("email"),
-                otp=entities.get("otp"),
-                index=entities.get("index_ref"),
-                source="llm",
-            )
-            await nlp_router.execute_intent(update, context, filled_intent)
-            return
-
-    if await nlp_router.handle_pending_action(update, context):
-        return
-
     # Passive email capture after login (if user replies with an email)
     if is_authenticated and validators.validate_email(text) and not models.get_user_email(uid):
         if models.set_user_email(uid, text):
+            models.set_security_alerts(uid, telegram_enabled=True, email_enabled=True)
             await update.message.reply_text(
-                f"✅ Email updated\n\n"
-                f"Address: {text}\n\n"
-                "You will receive security alerts at this email if suspicious activity is detected."
+                f"✅ Email alerts enabled\n\n"
+                f"Address: {text}"
             )
         else:
             await update.message.reply_text(
@@ -418,135 +414,13 @@ async def handle_text_input(update, context) -> None:
             )
         return
 
-    # ── Copilot AI layer ──────────────────────────────────────────────────
-    if await _handle_copilot_message(update, context, text):
-        return
-
-    # ── Keyword NLP fallback ──────────────────────────────────────────────
-    if await nlp_router.handle_nlp_message(update, context):
+    # ── Dialogue Manager ────────────────────────────────────────────────
+    if await dialogue_manager.handle_message(update, context, text):
         return
 
     if not is_authenticated:
         await update.message.reply_text(formatter.login_required())
         return
-
-
-async def _handle_copilot_message(update, context, text: str) -> bool:
-    """Route through the copilot AI layer: greeting → LLM → slot fill → execute.
-
-    Returns True if the message was handled, False to fall through to keyword NLP.
-    """
-    from copilot.greeting import detect_greeting
-    from copilot import llm as copilot_llm
-    from copilot import slot_filler
-    from copilot import response_gen
-    from copilot import user_profile
-    from nlp import context as nlp_context
-    from nlp.intents import IntentType, Intent
-
-    uid = update.effective_user.id
-
-    # ── Step 1: Fast greeting check (no LLM call) ────────────────────────
-    greeting = detect_greeting(text)
-    if greeting.matched:
-        nlp_context.add_turn(context.user_data, "user", text, "greeting")
-        await update.message.reply_text(greeting.response)
-        nlp_context.add_turn(context.user_data, "assistant", greeting.response, "greeting")
-        return True
-
-    # ── Step 2: Check if LLM is available ─────────────────────────────────
-    if not copilot_llm.is_available():
-        return False  # fall through to keyword NLP
-
-    # ── Step 3: LLM intent extraction ─────────────────────────────────────
-    history = nlp_context.get_history(context.user_data, limit=10)
-
-    # Build context string
-    from bot import nav
-    context_parts = []
-    current_path = nav.breadcrumb(uid)
-    if current_path:
-        context_parts.append(f"Current folder: {current_path}")
-    # Use the new search context system (single source of truth)
-    active_results, active_query = nlp_context.get_active_results(context.user_data)
-    if active_results:
-        result_names = [r.get("name", "file") for r in active_results[:5]]
-        context_parts.append(f"Last shown files: {', '.join(result_names)}")
-        if active_query:
-            context_parts.append(f"Last search query: {active_query}")
-    user_context = "; ".join(context_parts)
-
-    result = await copilot_llm.extract_intent(
-        user_message=text,
-        conversation_history=history,
-        user_context=user_context,
-    )
-
-    if not result.success:
-        return False  # fall through to keyword NLP
-
-    # Record conversation turn
-    nlp_context.add_turn(context.user_data, "user", text, result.intent)
-
-    # ── Step 4: Handle chitchat via LLM ───────────────────────────────────
-    if result.is_chitchat and result.chitchat_response:
-        resp = result.chitchat_response
-        await update.message.reply_text(resp)
-        nlp_context.add_turn(context.user_data, "assistant", resp, "greeting")
-        return True
-
-    # ── Step 5: Handle off-topic ──────────────────────────────────────────
-    if result.is_off_topic:
-        resp = formatter.off_topic_response("", result.redirect_suggestion)
-        await update.message.reply_text(resp)
-        nlp_context.add_turn(context.user_data, "assistant", resp, "off_topic")
-        return True
-
-    # ── Step 6: Map LLM intent to IntentType ──────────────────────────────
-    try:
-        intent_type = IntentType(result.intent)
-    except ValueError:
-        return False  # unknown intent, fall through to keyword NLP
-
-    # ── Step 7: Check slot completeness ───────────────────────────────────
-    slot_result = slot_filler.check_slots(result.intent, result.entities)
-    if not slot_result.complete:
-        # Use LLM's clarification if available, otherwise use slot filler's prompt
-        prompt = result.clarification or slot_result.prompt or "Could you provide more details?"
-        slot_filler.set_pending(context.user_data, {
-            "intent": result.intent,
-            "entities": result.entities,
-            "awaiting_slot": slot_result.missing_slot,
-            "entity_key": slot_result.pending_state.get("entity_key", "") if slot_result.pending_state else "",
-        })
-        resp = formatter.copilot_clarify(prompt)
-        await update.message.reply_text(resp)
-        nlp_context.add_turn(context.user_data, "assistant", resp, "slot_fill")
-        return True
-
-    # ── Step 8: Build Intent and execute ──────────────────────────────────
-    entities = result.entities
-    intent = Intent(
-        intent=intent_type,
-        confidence=result.confidence,
-        raw_text=text,
-        query=entities.get("query"),
-        index=entities.get("index_ref"),
-        target_name=entities.get("folder_name") or entities.get("new_name") or entities.get("target_folder"),
-        email=entities.get("email"),
-        otp=entities.get("otp"),
-        bulk=result.bulk,
-        file_type_hint=entities.get("file_type"),
-        suggested_actions=result.suggested_actions,
-        source="llm",
-    )
-
-    # Log behavior for user intelligence
-    if intent_type == IntentType.SEARCH and entities.get("query"):
-        user_profile.log_search(uid, entities["query"])
-
-    handled = await nlp_router.execute_intent(update, context, intent)
-    return handled
 
 
 
@@ -556,6 +430,7 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("menu",     cmd_menu))
     app.add_handler(CommandHandler("help",     cmd_help))
     app.add_handler(CommandHandler("tool",     cmd_tool))
+    app.add_handler(CommandHandler("security", cmd_security))
 
     # ── Navigation ────────────────────────────────────────────────────────────
     app.add_handler(CommandHandler("info",     cmd_info))

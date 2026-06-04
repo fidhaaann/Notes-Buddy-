@@ -168,20 +168,25 @@ async def oauth_callback(request: Request):
 
         # ── Notify the user inside Telegram ───────────────────────────────────
         if _bot_app is not None:
-            from bot.formatter import login_successful, email_setup_prompt
-            from bot.ui import post_login_keyboard, stepup_email_entry_keyboard
-            from db import models
+                from bot.formatter import welcome_authenticated_dynamic, email_setup_prompt
+                from bot.ui import post_login_keyboard, security_setup_keyboard
+                from db import models
+                from copilot import user_profile
             try:
                 await _bot_app.bot.send_message(
                     chat_id=telegram_id,
-                    text=login_successful(),
+                    text=welcome_authenticated_dynamic(
+                        user_profile.get_experience_level(telegram_id),
+                        (models.get_user_settings(telegram_id).get("mode_override") or "adaptive"),
+                    ),
                     reply_markup=post_login_keyboard(),
                 )
-                if not models.get_user_email(telegram_id):
+                settings = models.get_user_settings(telegram_id)
+                if not settings.get("security_setup_done"):
                     await _bot_app.bot.send_message(
                         chat_id=telegram_id,
                         text=email_setup_prompt(),
-                        reply_markup=stepup_email_entry_keyboard(),
+                        reply_markup=security_setup_keyboard(),
                     )
             except Exception:
                 logger.warning("Could not send success message to user %s", telegram_id)

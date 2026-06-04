@@ -196,6 +196,40 @@ def get_ranking_boost(telegram_id: int, file_name: str, mime_type: str = "") -> 
     return min(1.0, boost)
 
 
+def get_action_count(telegram_id: int) -> int:
+    """Return total recorded actions for the user."""
+    from db import models
+    try:
+        with models.get_connection() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS cnt FROM user_behavior WHERE telegram_id = ?",
+                (telegram_id,),
+            ).fetchone()
+        return int(row["cnt"]) if row else 0
+    except Exception:
+        return 0
+
+
+def get_experience_level(telegram_id: int) -> str:
+    """Classify user experience based on action count."""
+    count = get_action_count(telegram_id)
+    if count < 20:
+        return "beginner"
+    if count >= 100:
+        return "expert"
+    return "intermediate"
+
+
+def get_effective_mode(telegram_id: int) -> str:
+    """Return 'guided', 'expert', or 'adaptive' based on user settings."""
+    from db import models
+    settings = models.get_user_settings(telegram_id)
+    override = settings.get("mode_override")
+    if override in {"guided", "expert"}:
+        return override
+    return "adaptive"
+
+
 # ── Stop words for subject extraction ─────────────────────────────────────────
 
 _STOP_WORDS: set[str] = {

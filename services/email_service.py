@@ -229,3 +229,23 @@ To restore access, send /login to the bot.
             success = False
     
     return success
+
+
+def alert_failed_otp(telegram_id: int, user_email: str | None, attempts: int) -> bool:
+    """Notify user about repeated failed verification attempts."""
+    subject = f"🔐 Security Alert: Failed Verification Attempts (User {telegram_id})"
+    body = f"""
+Security Alert - Failed Verification Attempts
+
+User ID: {telegram_id}
+Failed Attempts: {attempts}
+Timestamp: {__import__('datetime').datetime.now().isoformat()}
+
+If this wasn't you:
+1. Change your Google password immediately
+2. Review your account security settings
+3. Reconnect to NotesBuddy when ready
+"""
+    if not user_email:
+        return False
+    return send_email(user_email, subject, body, is_html=False)

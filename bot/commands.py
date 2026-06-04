@@ -28,6 +28,7 @@ from drive import auth as drive_auth
 from drive import drive_service as ds
 from bot import formatter, ui
 from bot import nav
+from copilot import user_profile
 from services import parser as p
 from services import anomaly_detection
 from services import stepup_auth
@@ -195,10 +196,18 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     if _is_authenticated(uid):
+        settings = models.get_user_settings(uid)
+        level = user_profile.get_experience_level(uid)
+        mode = settings.get("mode_override") or "adaptive"
         await _msg(update).reply_text(
-            formatter.welcome_authenticated(),
+            formatter.welcome_authenticated_dynamic(level, mode),
             reply_markup=ui.post_login_keyboard(),
         )
+        if not settings.get("security_setup_done"):
+            await _msg(update).reply_text(
+                formatter.email_setup_prompt(),
+                reply_markup=ui.security_setup_keyboard(),
+            )
     else:
         # Generate OAuth URL and send as inline button (never raw URL)
         try:
@@ -285,7 +294,7 @@ async def cmd_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
             await _msg(update).reply_text(
                 text,
-                reply_markup=ui.browse_keyboard(is_root=is_root),
+                reply_markup=ui.browse_items_keyboard(index_map, is_root=is_root),
             )
     except PermissionError:
         await _msg(update).reply_text(formatter.login_required())
@@ -679,7 +688,7 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                     nav.set_active_view(uid, "search_suggestions", index_map, metadata={"keyword": keyword})
                     await _msg(update).reply_text(
                         formatter.nlp_suggestions("Closest Matches", labels),
-                        reply_markup=ui.back_to_menu_keyboard(),
+                        reply_markup=ui.results_keyboard(index_map),
                     )
                     return
                 await _msg(update).reply_text(
@@ -710,7 +719,7 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
             await _msg(update).reply_text(
                 formatter.search_results_indexed(keyword, index_map),
-                reply_markup=ui.back_to_menu_keyboard(),
+                reply_markup=ui.results_keyboard(index_map),
             )
     except PermissionError:
         await _msg(update).reply_text(formatter.login_required())
@@ -1121,6 +1130,32 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def cmd_security(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = _uid(update)
+    if not _is_authenticated(uid):
+        await _msg(update).reply_text(formatter.login_required())
+        return
+    settings = models.get_user_settings(uid)
+    recent = models.get_recent_activity(uid, limit=5)
+    level = user_profile.get_experience_level(uid)
+    mode = settings.get("mode_override") or "adaptive"
+    await _msg(update).reply_text(
+        formatter.security_center(
+            telegram_on=bool(settings.get("telegram_alerts_enabled", True)),
+            email_on=bool(settings.get("email_alerts_enabled", False)),
+            otp_on=stepup_auth.stepup_enabled(),
+            mode=mode,
+            level=level,
+            recent=recent,
+        ),
+        reply_markup=ui.security_center_keyboard(
+            telegram_on=bool(settings.get("telegram_alerts_enabled", True)),
+            email_on=bool(settings.get("email_alerts_enabled", False)),
+            mode=mode,
+        ),
+    )
+
+
 async def cmd_tool(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await cmd_help(update, context)
 
@@ -1139,22 +1174,20 @@ async def cmd_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     
     if not args:
-        # Show current email
         current_email = models.get_user_email(uid)
         if current_email:
             await _msg(update).reply_text(
                 f"📧 Your current email: {current_email}\n\n"
-                "Usage: /email <your-email@example.com>"
+                "Reply with a new email to update it."
             )
         else:
             assert context.user_data is not None
-            context.user_data["awaiting_email"] = True
+            context.user_data["awaiting_security_email"] = True
             await _msg(update).reply_text(
-                "📧 Security Alerts\n\n"
-                "Set your email to receive alerts if unusual activity is detected.\n\n"
-                "Reply with your email now (e.g. you@example.com)\n"
-                "or use /email your-email@example.com",
-                reply_markup=ui.stepup_email_entry_keyboard(),
+                "📧 Email Alerts\n\n"
+                "Reply with your email to enable alerts.\n"
+                "Example: you@example.com",
+                reply_markup=ui.security_email_keyboard(),
             )
         return
     
@@ -1174,10 +1207,11 @@ async def cmd_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if models.set_user_email(uid, email):
         assert context.user_data is not None
         context.user_data.pop("awaiting_email", None)
+        context.user_data.pop("awaiting_security_email", None)
+        models.set_security_alerts(uid, telegram_enabled=True, email_enabled=True)
         await _msg(update).reply_text(
-            f"✅ Email updated\n\n"
-            f"Address: {email}\n\n"
-            "You will receive security alerts at this email if suspicious activity is detected."
+            f"✅ Email alerts enabled\n\n"
+            f"Address: {email}"
         )
         logger.info("Email set for user %s: %s", uid, email)
 

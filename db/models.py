@@ -123,6 +123,16 @@ def init_db() -> None:
                 created_at  TEXT DEFAULT (datetime('now'))
             );
 
+            CREATE TABLE IF NOT EXISTS user_settings (
+                telegram_id INTEGER PRIMARY KEY,
+                telegram_alerts_enabled BOOLEAN DEFAULT 1,
+                email_alerts_enabled    BOOLEAN DEFAULT 0,
+                security_setup_done     BOOLEAN DEFAULT 0,
+                mode_override           TEXT,
+                created_at              TEXT DEFAULT (datetime('now')),
+                updated_at              TEXT DEFAULT (datetime('now'))
+            );
+
             CREATE TABLE IF NOT EXISTS security_alerts (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 telegram_id INTEGER NOT NULL,
@@ -200,6 +210,22 @@ def init_db() -> None:
                 """
             )
             logger.info("Created user_emails table for alert notifications.")
+
+        if "user_settings" not in tables:
+            conn.execute(
+                """
+                CREATE TABLE user_settings (
+                    telegram_id INTEGER PRIMARY KEY,
+                    telegram_alerts_enabled BOOLEAN DEFAULT 1,
+                    email_alerts_enabled    BOOLEAN DEFAULT 0,
+                    security_setup_done     BOOLEAN DEFAULT 0,
+                    mode_override           TEXT,
+                    created_at              TEXT DEFAULT (datetime('now')),
+                    updated_at              TEXT DEFAULT (datetime('now'))
+                )
+                """
+            )
+            logger.info("Created user_settings table.")
         
         if "security_alerts" not in tables:
             conn.execute(
@@ -537,6 +563,100 @@ def get_user_email(telegram_id: int) -> str | None:
             (telegram_id,),
         ).fetchone()
     return row["email"] if row else None
+
+
+# ── User settings helpers ──────────────────────────────────────────────────────
+
+_DEFAULT_SETTINGS = {
+    "telegram_alerts_enabled": True,
+    "email_alerts_enabled": False,
+    "security_setup_done": False,
+    "mode_override": None,
+}
+
+
+def get_user_settings(telegram_id: int) -> dict:
+    """Return user settings with defaults if no record exists."""
+    with get_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT telegram_alerts_enabled, email_alerts_enabled, security_setup_done, mode_override
+            FROM user_settings WHERE telegram_id = ?
+            """,
+            (telegram_id,),
+        ).fetchone()
+    if not row:
+        return dict(_DEFAULT_SETTINGS)
+    return {
+        "telegram_alerts_enabled": bool(row["telegram_alerts_enabled"]),
+        "email_alerts_enabled": bool(row["email_alerts_enabled"]),
+        "security_setup_done": bool(row["security_setup_done"]),
+        "mode_override": row["mode_override"],
+    }
+
+
+def update_user_settings(telegram_id: int, **fields) -> None:
+    """Upsert user settings fields."""
+    allowed = {"telegram_alerts_enabled", "email_alerts_enabled", "security_setup_done", "mode_override"}
+    updates = {k: v for k, v in fields.items() if k in allowed}
+    if not updates:
+        return
+    columns = ", ".join(f"{k} = ?" for k in updates)
+    values = list(updates.values())
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO user_settings (telegram_id)
+            VALUES (?)
+            ON CONFLICT(telegram_id) DO NOTHING
+            """,
+            (telegram_id,),
+        )
+        conn.execute(
+            f"""
+            UPDATE user_settings
+            SET {columns}, updated_at = datetime('now')
+            WHERE telegram_id = ?
+            """,
+            (*values, telegram_id),
+        )
+
+
+def set_security_alerts(telegram_id: int, telegram_enabled: bool, email_enabled: bool) -> None:
+    update_user_settings(
+        telegram_id,
+        telegram_alerts_enabled=1 if telegram_enabled else 0,
+        email_alerts_enabled=1 if email_enabled else 0,
+        security_setup_done=1,
+    )
+
+
+def set_mode_override(telegram_id: int, mode: str | None) -> None:
+    """Set experience override: 'guided', 'expert', or None for adaptive."""
+    update_user_settings(telegram_id, mode_override=mode)
+
+
+def get_recent_activity(telegram_id: int, limit: int = 5) -> list[dict]:
+    """Fetch recent user activity for security center display."""
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT action, target_name, created_at
+            FROM user_behavior
+            WHERE telegram_id = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (telegram_id, limit),
+        ).fetchall()
+    return [
+        {
+            "action": row["action"],
+            "target_name": row["target_name"],
+            "created_at": row["created_at"],
+        }
+        for row in rows
+    ]
 
 
 # ── Step-up verification helpers (email OTP) ───────────────────────────────────

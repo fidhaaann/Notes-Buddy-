@@ -26,6 +26,7 @@ from googleapiclient.errors import HttpError
 from drive import drive_service as ds
 from bot import formatter, ui, nav
 from db import models
+from copilot import user_profile
 from services.parser import human_size
 from services import anomaly_detection
 from services import stepup_auth
@@ -185,7 +186,7 @@ async def _send_browse(uid: int, query, update) -> None:
                 )
             is_root = (fid == "root")
 
-            await _reply(query, update, text, ui.browse_keyboard(is_root=is_root))
+            await _reply(query, update, text, ui.browse_items_keyboard(index_map, is_root=is_root))
     except PermissionError:
         await _reply(query, update, formatter.login_required())
     except Exception as e:
@@ -231,7 +232,7 @@ async def _send_recent(uid: int, query, update) -> None:
             query,
             update,
             formatter.recent_results(index_map),
-            ui.back_to_menu_keyboard(),
+            ui.results_keyboard(index_map),
         )
     except Exception:
         logger.exception("_send_recent error")
@@ -354,6 +355,30 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 return
             await _send_recent(uid, query, update)
 
+        elif action == "security":
+            from services import stepup_auth
+            settings = models.get_user_settings(uid)
+            recent = models.get_recent_activity(uid, limit=5)
+            level = user_profile.get_experience_level(uid)
+            mode = settings.get("mode_override") or "adaptive"
+            await _reply(
+                query,
+                update,
+                formatter.security_center(
+                    telegram_on=bool(settings.get("telegram_alerts_enabled", True)),
+                    email_on=bool(settings.get("email_alerts_enabled", False)),
+                    otp_on=stepup_auth.stepup_enabled(),
+                    mode=mode,
+                    level=level,
+                    recent=recent,
+                ),
+                ui.security_center_keyboard(
+                    telegram_on=bool(settings.get("telegram_alerts_enabled", True)),
+                    email_on=bool(settings.get("email_alerts_enabled", False)),
+                    mode=mode,
+                ),
+            )
+
         elif action == "mkdir":
             await _reply(
                 query, update,
@@ -467,6 +492,58 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         return
 
+    # ── Item (folder/file) ─────────────────────────────────────────────────
+
+    if ns == "item":
+        action = parts[1] if len(parts) > 1 else ""
+        item_id = parts[2] if len(parts) > 2 else ""
+
+        if not _validate_file_id(item_id):
+            logger.warning("Invalid item_id in callback from user %s", uid)
+            await _reply(query, update, formatter.error("Invalid item reference."))
+            return
+
+        if not _is_authenticated(uid):
+            await _reply(query, update, formatter.login_required())
+            return
+
+        try:
+            meta = await ds.get_file_metadata_async(uid, item_id)
+        except Exception:
+            logger.exception("item callback metadata error")
+            await _reply(query, update, formatter.error("Could not load item details."))
+            return
+
+        mime_type = meta.get("mimeType", "")
+        shortcut = meta.get("shortcutDetails") or {}
+        target_id = shortcut.get("targetId")
+        target_mime = shortcut.get("targetMimeType")
+
+        if action == "open":
+            is_folder = mime_type == ds.FOLDER_MIME or target_mime == ds.FOLDER_MIME
+            if not is_folder:
+                await _handle_download(uid, item_id, query, context, update)
+                return
+            open_id = target_id if target_id and target_mime == ds.FOLDER_MIME else item_id
+            if nav.is_in_stack(uid, open_id):
+                await _reply(query, update, formatter.error("Navigation loop detected."))
+                return
+            nav.push_folder(uid, open_id, meta.get("name", "Folder"))
+            user_profile.log_folder_access(uid, open_id, meta.get("name", "Folder"))
+            await _send_browse(uid, query, update)
+            return
+
+        if action == "info":
+            is_folder = mime_type == ds.FOLDER_MIME or target_mime == ds.FOLDER_MIME
+            if is_folder:
+                await _reply(query, update, formatter.file_info(meta), ui.folder_actions_keyboard(item_id))
+            else:
+                is_fav = models.is_favorite(uid, item_id)
+                await _reply(query, update, formatter.file_info(meta), ui.file_actions_keyboard(item_id, is_fav))
+            return
+
+        return
+
     # ── Confirmation ──────────────────────────────────────────────────────────
 
     if ns == "confirm":
@@ -561,6 +638,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     manager = get_task_manager(context)
                     if manager:
                         await manager.enqueue_index(uid, uploaded["id"])
+                    user_profile.log_upload(uid, uploaded.get("id", ""), uploaded.get("name", safe_name), uploaded.get("mimeType", ""))
                     await _reply(
                         query, update,
                         formatter.upload_success(uploaded["name"], nav.breadcrumb(uid)),
@@ -586,6 +664,107 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 formatter.success("Upload Cancelled"),
                 ui.post_login_keyboard(),
             )
+
+        return
+
+    # ── Security settings ─────────────────────────────────────────────────
+
+    if ns == "security":
+        action = parts[1] if len(parts) > 1 else ""
+
+        if not _is_authenticated(uid):
+            await _reply(query, update, formatter.login_required())
+            return
+
+        if action == "enable":
+            models.set_security_alerts(uid, telegram_enabled=True, email_enabled=False)
+            assert context.user_data is not None
+            context.user_data["awaiting_security_email"] = True
+            await _reply(
+                query,
+                update,
+                formatter.security_enabled(),
+                ui.security_email_keyboard(),
+            )
+            return
+
+        if action == "skip":
+            models.set_security_alerts(uid, telegram_enabled=True, email_enabled=False)
+            assert context.user_data is not None
+            context.user_data.pop("awaiting_security_email", None)
+            await _reply(query, update, formatter.security_skipped())
+            return
+
+        if action == "skip_email":
+            settings = models.get_user_settings(uid)
+            models.set_security_alerts(uid, telegram_enabled=settings.get("telegram_alerts_enabled", True), email_enabled=False)
+            assert context.user_data is not None
+            context.user_data.pop("awaiting_security_email", None)
+            await _reply(query, update, formatter.security_email_skipped())
+            return
+
+        if action == "toggle":
+            target = parts[2] if len(parts) > 2 else ""
+            settings = models.get_user_settings(uid)
+            if target == "telegram":
+                models.update_user_settings(uid, telegram_alerts_enabled=0 if settings.get("telegram_alerts_enabled") else 1)
+            elif target == "email":
+                models.update_user_settings(uid, email_alerts_enabled=0 if settings.get("email_alerts_enabled") else 1)
+            settings = models.get_user_settings(uid)
+            recent = models.get_recent_activity(uid, limit=5)
+            level = user_profile.get_experience_level(uid)
+            mode = settings.get("mode_override") or "adaptive"
+            await _reply(
+                query,
+                update,
+                formatter.security_center(
+                    telegram_on=bool(settings.get("telegram_alerts_enabled", True)),
+                    email_on=bool(settings.get("email_alerts_enabled", False)),
+                    otp_on=stepup_auth.stepup_enabled(),
+                    mode=mode,
+                    level=level,
+                    recent=recent,
+                ),
+                ui.security_center_keyboard(
+                    telegram_on=bool(settings.get("telegram_alerts_enabled", True)),
+                    email_on=bool(settings.get("email_alerts_enabled", False)),
+                    mode=mode,
+                ),
+            )
+            return
+
+        if action == "mode":
+            settings = models.get_user_settings(uid)
+            current = settings.get("mode_override")
+            if current == "guided":
+                next_mode = "expert"
+            elif current == "expert":
+                next_mode = None
+            else:
+                next_mode = "guided"
+            models.set_mode_override(uid, next_mode)
+            settings = models.get_user_settings(uid)
+            effective = settings.get("mode_override") or "adaptive"
+            recent = models.get_recent_activity(uid, limit=5)
+            level = user_profile.get_experience_level(uid)
+            await _reply(
+                query,
+                update,
+                formatter.security_center(
+                    telegram_on=bool(settings.get("telegram_alerts_enabled", True)),
+                    email_on=bool(settings.get("email_alerts_enabled", False)),
+                    otp_on=stepup_auth.stepup_enabled(),
+                    mode=effective,
+                    level=level,
+                    recent=recent,
+                ),
+                ui.security_center_keyboard(
+                    telegram_on=bool(settings.get("telegram_alerts_enabled", True)),
+                    email_on=bool(settings.get("email_alerts_enabled", False)),
+                    mode=effective,
+                ),
+            )
+            return
 
         return
 
@@ -641,6 +820,7 @@ async def _handle_download(uid: int, file_id: str, query, context, update) -> No
                 filename=fname,
                 size_str=size_str,
             )
+            user_profile.log_download(uid, file_id, fname, meta.get("mimeType", ""))
 
     except PermissionError:
         await _reply(query, update, formatter.login_required(), ui.back_to_menu_keyboard())

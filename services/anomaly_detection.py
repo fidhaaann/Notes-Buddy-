@@ -16,6 +16,7 @@ import logging
 from db import models
 from drive import auth as drive_auth
 from services import email_service
+from services import alert_service
 
 logger = logging.getLogger(__name__)
 
@@ -72,36 +73,40 @@ async def handle_anomaly_detected(telegram_id: int, action: str, count: int) -> 
         action_taken="All user tokens revoked"
     )
     
-    # Revoke ALL user tokens (emergency measure)
-    revoked_users = []
+    # Revoke only the affected user's token
+    revoked = False
     try:
-        all_users = models.get_all_users()  # Will add this function
-        for user in all_users:
-            uid = user["telegram_id"]
-            try:
-                drive_auth.revoke_token(uid)
-                revoked_users.append(uid)
-                logger.info("Revoked token for user %s (anomaly response)", uid)
-            except Exception as e:
-                logger.error("Failed to revoke token for user %s: %s", uid, e)
+        drive_auth.revoke_token(telegram_id)
+        revoked = True
+        logger.info("Revoked token for user %s (anomaly response)", telegram_id)
     except Exception as e:
-        logger.error("Failed to revoke all tokens: %s", e)
+        logger.error("Failed to revoke token for user %s: %s", telegram_id, e)
     
     # Send alerts
-    try:
-        email_service.alert_suspicious_activity(
-            telegram_id=telegram_id,
-            user_email=user_email,
-            action_type=action,
-            count=count
-        )
-    except Exception as e:
-        logger.error("Failed to send alert email: %s", e)
+    alert_message = (
+        "🛡 Security Alert\n\n"
+        f"Detected unusual activity: {count} {action} operations in 5 minutes.\n"
+        "As a precaution, your Drive access has been revoked.\n\n"
+        "If this was you, please reconnect with /login.\n"
+        "If not, change your Google password and review account security."
+    )
+    await alert_service.send_telegram_alert(telegram_id, alert_message)
+
+    if user_email and alert_service.email_alerts_enabled(telegram_id):
+        try:
+            email_service.alert_suspicious_activity(
+                telegram_id=telegram_id,
+                user_email=user_email,
+                action_type=action,
+                count=count
+            )
+        except Exception as e:
+            logger.error("Failed to send alert email: %s", e)
     
     # Log details
     logger.warning(
-        "ANOMALY RESPONSE COMPLETE: revoked_users=%d severity=high action=%s",
-        len(revoked_users), action
+        "ANOMALY RESPONSE COMPLETE: revoked=%s severity=high action=%s",
+        revoked, action
     )
 
 

@@ -19,22 +19,22 @@ from bot.nav import IndexedItem, FOLDER_MIME
 def _file_icon(mime_type: str) -> str:
     """Return a single icon character for a given MIME type."""
     if not mime_type:
-        return "○"
+        return "📄"
     m = mime_type.lower()
     if "shortcut" in m:                                     return "↪"
-    if "folder" in m:                                       return "▸"
-    if m.startswith("image/"):                              return "◈"
-    if m.startswith("video/"):                              return "▶"
-    if m.startswith("audio/"):                              return "♪"
-    if "pdf" in m:                                          return "▪"
-    if "spreadsheet" in m or "excel" in m or "csv" in m:    return "▦"
-    if "presentation" in m or "powerpoint" in m:            return "▧"
-    if "document" in m or "word" in m or "msword" in m:     return "▫"
-    if "zip" in m or "compressed" in m or "rar" in m:       return "▣"
-    if "text/plain" in m:                                   return "▭"
+    if "folder" in m:                                       return "📂"
+    if m.startswith("image/"):                              return "🖼"
+    if m.startswith("video/"):                              return "🎥"
+    if m.startswith("audio/"):                              return "🎵"
+    if "pdf" in m:                                          return "📄"
+    if "spreadsheet" in m or "excel" in m or "csv" in m:    return "📊"
+    if "presentation" in m or "powerpoint" in m:            return "📽"
+    if "document" in m or "word" in m or "msword" in m:     return "📄"
+    if "zip" in m or "compressed" in m or "rar" in m:       return "🗜"
+    if "text/plain" in m:                                   return "📝"
     if any(x in m for x in ("javascript", "python", "json", "html", "xml", "code")):
-        return "◇"
-    return "○"
+        return "💻"
+    return "📄"
 
 
 def _file_type_label(mime_type: str) -> str:
@@ -121,6 +121,39 @@ def welcome_authenticated() -> str:
     )
 
 
+def welcome_authenticated_dynamic(level: str, mode: str) -> str:
+    """Adaptive welcome message based on experience level and mode."""
+    if mode == "expert" or level == "expert":
+        return (
+            "Google Drive Connected Successfully.\n"
+            "\n"
+            "What do you need?\n"
+            "\n"
+            "Quick Actions:\n"
+            "  • Browse Files\n"
+            "  • Search\n"
+            "  • Upload\n"
+            "  • Recent Files"
+        )
+    if mode == "guided" or level == "beginner":
+        return welcome_authenticated()
+    return (
+        "Google Drive Connected Successfully.\n"
+        "\n"
+        "What would you like to do?\n"
+        "\n"
+        "Quick Actions:\n"
+        "  • Browse Files\n"
+        "  • Search Notes\n"
+        "  • Upload File\n"
+        "  • Recent Files\n"
+        "\n"
+        "Try:\n"
+        "  show my dbms notes\n"
+        "  open semester 4"
+    )
+
+
 def login_successful() -> str:
     return (
         "Google Drive Connected Successfully.\n"
@@ -144,14 +177,68 @@ def login_successful() -> str:
 
 def email_setup_prompt() -> str:
     return (
-        "📧 Security Alerts\n"
+        "🛡 Optional Security Alerts\n"
         "\n"
-        "Set your email to receive threat notifications.\n"
-        "Reply with your email now (e.g. you@example.com)\n"
-        "or say \"set my email to you@example.com\"\n"
+        "Would you like security alerts for suspicious activity?\n"
         "\n"
-        "This helps protect your Drive from unusual activity."
+        "You can enable Telegram alerts now and optionally add email later."
     )
+
+
+def security_enabled() -> str:
+    return (
+        "✅ Security Alerts Enabled\n"
+        "\n"
+        "Telegram alerts are now on.\n"
+        "You can add email alerts by replying with your email."
+    )
+
+
+def security_skipped() -> str:
+    return (
+        "Security alerts skipped.\n"
+        "\n"
+        "You can enable them anytime with /security."
+    )
+
+
+def security_email_skipped() -> str:
+    return (
+        "Email alerts skipped.\n"
+        "\n"
+        "Telegram alerts remain enabled."
+    )
+
+
+def security_center(
+    telegram_on: bool,
+    email_on: bool,
+    otp_on: bool,
+    mode: str,
+    level: str,
+    recent: list[dict],
+) -> str:
+    lines = [
+        "🛡 Security Center",
+        "",
+        f"Telegram Alerts: {'Enabled' if telegram_on else 'Disabled'}",
+        f"Email Alerts: {'Enabled' if email_on else 'Disabled'}",
+        f"OTP Protection: {'Enabled' if otp_on else 'Disabled'}",
+        f"Experience: {mode.capitalize()} ({level})",
+        "",
+        "Recent Activity:",
+    ]
+    if not recent:
+        lines.append("  • No recent activity")
+    else:
+        for item in recent:
+            action = item.get("action", "action")
+            target = item.get("target_name", "")
+            label = f"{action.replace('_', ' ').title()}"
+            if target:
+                label = f"{label} — {target}"
+            lines.append(f"  • {label}")
+    return "\n".join(lines)
 
 
 def login_required() -> str:
@@ -202,43 +289,18 @@ def directory_listing(
         lines.append("  or say \"go back\" to navigate elsewhere.")
         return "\n".join(lines)
 
-    # Collect folder indices and file indices
     folder_items = [(idx, item) for idx, item in sorted(index_map.items(), key=_sort_index) if item.is_folder and "." not in idx]
     file_items = [(idx, item) for idx, item in sorted(index_map.items(), key=_sort_index) if not item.is_folder and "." not in idx]
+    combined = folder_items + file_items
 
-    # Sub-items (children of folders shown in expanded view)
-    child_items: dict[str, list[tuple[str, IndexedItem]]] = {}
-    for idx, item in sorted(index_map.items(), key=_sort_index):
-        if "." in idx:
-            parent = idx.rsplit(".", 1)[0]
-            child_items.setdefault(parent, []).append((idx, item))
-
-    if folder_items:
-        lines.append("📂 Directories")
-        lines.append("")
-        for idx, item in folder_items:
+    if combined:
+        for i, (idx, item) in enumerate(combined):
             icon = _file_icon(item.mime_type)
-            lines.append(f"  [{idx}]  {icon} {item.name}")
-            # Show children if expanded
-            if idx in child_items:
-                for cidx, citem in child_items[idx]:
-                    cicon = _file_icon(citem.mime_type)
-                    lines.append(f"    [{cidx}]  {cicon} {citem.name}")
+            branch = "└──" if i == len(combined) - 1 else "├──"
+            lines.append(f"{branch} [{idx}] {icon} {item.name}")
         lines.append("")
 
-    if file_items:
-        lines.append("📄 Files")
-        lines.append("")
-        for idx, item in file_items:
-            icon = _file_icon(item.mime_type)
-            lines.append(f"  [{idx}]  {icon} {item.name}")
-        lines.append("")
-
-    lines.append("─" * 34)
-    lines.append("  say \"open 2\"   say \"download 3\"")
-    lines.append("  say \"details 3\" or \"delete 3\"")
-    lines.append("  say \"go back\"")
-
+    lines.append("Use the buttons below, or reply with a number.")
     return "\n".join(lines)
 
 
@@ -526,8 +588,7 @@ def search_results_indexed(keyword: str, index_map: dict[str, IndexedItem]) -> s
         lines.append(f"  [{idx}]  {icon} {item.name}")
     
     lines.append("")
-    lines.append("─" * 34)
-    lines.append("  say \"download 2\" or \"details 2\"")
+    lines.append("Use the buttons below, or reply with a number.")
     return "\n".join(lines)
 
 
@@ -544,8 +605,7 @@ def favorites_results(index_map: dict[str, IndexedItem]) -> str:
         icon = _file_icon(item.mime_type)
         lines.append(f"  [{idx}]  {icon} {item.name}")
     lines.append("")
-    lines.append("─" * 34)
-    lines.append("  say \"download 2\" or \"details 2\"")
+    lines.append("Use the buttons below, or reply with a number.")
     return "\n".join(lines)
 
 
@@ -562,8 +622,7 @@ def recent_results(index_map: dict[str, IndexedItem]) -> str:
         icon = _file_icon(item.mime_type)
         lines.append(f"  [{idx}]  {icon} {item.name}")
     lines.append("")
-    lines.append("─" * 34)
-    lines.append("  say \"download 2\" or \"details 2\"")
+    lines.append("Use the buttons below, or reply with a number.")
     return "\n".join(lines)
 
 

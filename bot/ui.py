@@ -9,8 +9,10 @@ Design principles:
 """
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from bot import nav
 
 FOLDER_MIME = "application/vnd.google-apps.folder"
+MAX_INLINE_ITEMS = 8
 
 
 # ── Start / Auth keyboards ───────────────────────────────────────────────────
@@ -29,7 +31,8 @@ def post_login_keyboard() -> InlineKeyboardMarkup:
          InlineKeyboardButton("Search Notes", callback_data="nav:search")],
         [InlineKeyboardButton("Upload File", callback_data="nav:upload"),
          InlineKeyboardButton("Recent Files", callback_data="nav:recent")],
-        [InlineKeyboardButton("Help", callback_data="nav:help")],
+        [InlineKeyboardButton("Security Center", callback_data="nav:security"),
+         InlineKeyboardButton("Help", callback_data="nav:help")],
     ])
 
 
@@ -53,7 +56,8 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
          InlineKeyboardButton("Search Notes", callback_data="nav:search")],
         [InlineKeyboardButton("Upload File", callback_data="nav:upload"),
          InlineKeyboardButton("Recent Files", callback_data="nav:recent")],
-        [InlineKeyboardButton("Help", callback_data="nav:help")],
+        [InlineKeyboardButton("Security Center", callback_data="nav:security"),
+         InlineKeyboardButton("Help", callback_data="nav:help")],
     ])
 
 
@@ -78,6 +82,43 @@ def browse_keyboard(is_root: bool = True) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+def browse_items_keyboard(index_map: dict[str, nav.IndexedItem], is_root: bool = True) -> InlineKeyboardMarkup:
+    """Inline-first listing actions for folders/files with navigation controls."""
+    rows = []
+    count = 0
+    for idx in sorted(index_map.keys(), key=lambda x: int(x) if x.isdigit() else 999):
+        item = index_map[idx]
+        if count >= MAX_INLINE_ITEMS:
+            break
+        if item.is_folder:
+            action = InlineKeyboardButton("Open", callback_data=f"item:open:{item.id}")
+        else:
+            action = InlineKeyboardButton("Download", callback_data=f"file:download:{item.id}")
+        details = InlineKeyboardButton("Details", callback_data=f"item:info:{item.id}")
+        rows.append([action, details])
+        count += 1
+
+    nav_rows = browse_keyboard(is_root=is_root).inline_keyboard
+    rows.extend(nav_rows)
+    return InlineKeyboardMarkup(rows)
+
+
+def results_keyboard(index_map: dict[str, nav.IndexedItem]) -> InlineKeyboardMarkup:
+    """Inline actions for search/recent/favorites result lists."""
+    rows = []
+    count = 0
+    for idx in sorted(index_map.keys(), key=lambda x: int(x) if x.isdigit() else 999):
+        item = index_map[idx]
+        if count >= MAX_INLINE_ITEMS:
+            break
+        action = InlineKeyboardButton("Download", callback_data=f"file:download:{item.id}")
+        details = InlineKeyboardButton("Details", callback_data=f"item:info:{item.id}")
+        rows.append([action, details])
+        count += 1
+    rows.append([InlineKeyboardButton("📋 Menu", callback_data="nav:menu")])
+    return InlineKeyboardMarkup(rows)
+
+
 # ── File action keyboard ─────────────────────────────────────────────────────
 
 def file_actions_keyboard(file_id: str, is_fav: bool = False) -> InlineKeyboardMarkup:
@@ -89,6 +130,15 @@ def file_actions_keyboard(file_id: str, is_fav: bool = False) -> InlineKeyboardM
          InlineKeyboardButton("🗑 Delete",    callback_data=f"file:delete:{file_id}")],
         [InlineKeyboardButton("⬅️ Back",      callback_data="nav:back"),
          InlineKeyboardButton("🏠 Home",      callback_data="nav:home")],
+    ])
+
+
+def folder_actions_keyboard(folder_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📂 Open", callback_data=f"item:open:{folder_id}"),
+         InlineKeyboardButton("ℹ️ Details", callback_data=f"item:info:{folder_id}")],
+        [InlineKeyboardButton("⬅️ Back", callback_data="nav:back"),
+         InlineKeyboardButton("🏠 Home", callback_data="nav:home")],
     ])
 
 
@@ -130,4 +180,29 @@ def stepup_email_entry_keyboard() -> InlineKeyboardMarkup:
     """Shown when waiting for email input."""
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("❌ Cancel", callback_data="nav:menu")],
+    ])
+
+
+def security_setup_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Enable Alerts", callback_data="security:enable"),
+         InlineKeyboardButton("Skip", callback_data="security:skip")],
+    ])
+
+
+def security_email_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("Skip Email", callback_data="security:skip_email")],
+    ])
+
+
+def security_center_keyboard(telegram_on: bool, email_on: bool, mode: str) -> InlineKeyboardMarkup:
+    t_label = "Telegram Alerts: On ✅" if telegram_on else "Telegram Alerts: Off ❌"
+    e_label = "Email Alerts: On ✅" if email_on else "Email Alerts: Off ❌"
+    mode_label = "Mode: Guided" if mode == "guided" else "Mode: Expert" if mode == "expert" else "Mode: Adaptive"
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(t_label, callback_data="security:toggle:telegram")],
+        [InlineKeyboardButton(e_label, callback_data="security:toggle:email")],
+        [InlineKeyboardButton(mode_label, callback_data="security:mode")],
+        [InlineKeyboardButton("⬅️ Back to Menu", callback_data="nav:menu")],
     ])
