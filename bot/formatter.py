@@ -849,3 +849,54 @@ def copilot_error(reason: str) -> str:
         f"Try rephrasing, or say \"help\" to see what I can do."
     )
 
+
+# ── Graceful search/reference error messages ──────────────────────────────────
+
+def context_expired() -> str:
+    """Friendly message when the previous search results have expired."""
+    return (
+        "🕒 Previous Search Expired\n"
+        "\n"
+        "  The previous search results are no longer active.\n"
+        "\n"
+        "  Please search again — for example:\n"
+        "  \"find dbms notes\" or \"search module 2\""
+    )
+
+
+def no_active_results() -> str:
+    """Friendly message when the user references results but none exist."""
+    return (
+        "🔍 No Active Results\n"
+        "\n"
+        "  I don't have any active search results to reference.\n"
+        "\n"
+        "  Try searching first:\n"
+        "  \"find dbms notes\" or \"show my files\""
+    )
+
+
+def ambiguous_reference() -> str:
+    """Friendly message when a reference can't be resolved."""
+    return (
+        "🤔 Which File?\n"
+        "\n"
+        "  I couldn't determine which file you're referring to.\n"
+        "\n"
+        "  Try:\n"
+        "  • \"download 2\" — pick by number\n"
+        "  • \"download the first one\" — pick by position\n"
+        "  • Search again if the results are stale"
+    )
+
+
+def index_out_of_range(max_items: int) -> str:
+    """Friendly message when a number exceeds the result count."""
+    return (
+        f"📋 Invalid Selection\n"
+        f"\n"
+        f"  That number doesn't match any result.\n"
+        f"  I have {max_items} item{'s' if max_items != 1 else ''} — "
+        f"pick 1 to {max_items}."
+    )
+
