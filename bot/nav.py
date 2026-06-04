@@ -14,6 +14,7 @@ Security: Stack depth is capped, and old inactive users are evicted.
 
 from __future__ import annotations
 
+import re
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -44,6 +45,7 @@ class ViewContext:
     view_type: str                                 # "folder", "search", "recent", etc.
     index_map: dict[str, IndexedItem]              # Simple: "1" → item, "2" → item
     metadata: dict = field(default_factory=dict)   # Additional context (keyword, folder_id, etc.)
+    created_at: float = field(default_factory=time.monotonic)  # For TTL expiry checks
 
 
 # ── Per-user session ──────────────────────────────────────────────────────────
@@ -60,8 +62,40 @@ _sessions: OrderedDict[int, _UserSession] = OrderedDict()
 MAX_STACK_DEPTH = 50
 MAX_USERS       = 5000
 _SESSION_TTL    = 3600 * 24  # 24 hours
+VIEW_TTL_SECONDS = 900       # 15 minutes — active view expiry
 
 FOLDER_MIME = "application/vnd.google-apps.folder"
+
+# Ordinal word → numeric index mapping for resolve_smart()
+_ORDINAL_TO_INDEX = {
+    "first": 1, "1st": 1,
+    "second": 2, "2nd": 2,
+    "third": 3, "3rd": 3,
+    "fourth": 4, "4th": 4,
+    "fifth": 5, "5th": 5,
+    "sixth": 6, "6th": 6,
+    "seventh": 7, "7th": 7,
+    "eighth": 8, "8th": 8,
+    "ninth": 9, "9th": 9,
+    "tenth": 10, "10th": 10,
+    "last": -1,
+}
+
+# Type keywords → mime type fragment mapping
+_TYPE_FRAGMENTS = {
+    "pdf": "pdf",
+    "image": "image/",
+    "photo": "image/",
+    "picture": "image/",
+    "video": "video/",
+    "audio": "audio/",
+    "doc": "document",
+    "document": "document",
+    "spreadsheet": "spreadsheet",
+    "sheet": "spreadsheet",
+    "presentation": "presentation",
+    "slide": "presentation",
+}
 
 
 def _get(uid: int) -> _UserSession:
@@ -194,6 +228,85 @@ def resolve_index(uid: int, index: str) -> Optional[IndexedItem]:
 def resolve_index_silent(uid: int, index: str) -> Optional[IndexedItem]:
     """Alias for resolve_index() for backward compatibility."""
     return resolve_index(uid, index)
+
+
+def resolve_smart(uid: int, ref: str) -> Optional[IndexedItem]:
+    """Resolve a human-like reference against the active view.
+
+    Handles:
+      - Numbers: "1", "2" → direct index lookup
+      - Ordinals: "first", "second", "last" → map to index
+      - Name fragments: "dbms" → fuzzy match against item names
+      - Type references: "the pdf" → filter by mime type
+
+    Returns the matched IndexedItem, or None.
+    """
+    s = _get(uid)
+    if not s.active_view or not s.active_view.index_map:
+        return None
+
+    index_map = s.active_view.index_map
+    ref_clean = ref.strip().lower()
+
+    # Strip common filler words
+    ref_clean = re.sub(r"\b(the|a|an|one|file|folder|item)\b", "", ref_clean).strip()
+
+    # 1. Direct numeric index
+    if ref_clean.isdigit():
+        return index_map.get(ref_clean)
+
+    # 2. Ordinal lookup
+    ordinal_idx = _ORDINAL_TO_INDEX.get(ref_clean)
+    if ordinal_idx is not None:
+        sorted_keys = sorted(index_map.keys(), key=lambda x: int(x) if x.isdigit() else 999)
+        if ordinal_idx == -1:
+            # "last"
+            if sorted_keys:
+                return index_map.get(sorted_keys[-1])
+        elif 1 <= ordinal_idx <= len(sorted_keys):
+            return index_map.get(sorted_keys[ordinal_idx - 1])
+        return None
+
+    # 3. Name fragment match
+    for item in index_map.values():
+        if ref_clean and ref_clean in item.name.lower():
+            return item
+
+    # 4. Type reference
+    type_frag = _TYPE_FRAGMENTS.get(ref_clean)
+    if type_frag:
+        for item in index_map.values():
+            mime_lower = (item.mime_type or "").lower()
+            name_lower = item.name.lower()
+            if type_frag in mime_lower or type_frag in name_lower:
+                return item
+
+    return None
+
+
+def is_view_expired(uid: int) -> bool:
+    """Check if the active view is older than VIEW_TTL_SECONDS."""
+    s = _get(uid)
+    if not s.active_view:
+        return True
+    return (time.monotonic() - s.active_view.created_at) > VIEW_TTL_SECONDS
+
+
+def clear_expired_view(uid: int) -> bool:
+    """Clear the active view if it has expired. Returns True if cleared."""
+    if is_view_expired(uid):
+        s = _get(uid)
+        s.active_view = None
+        return True
+    return False
+
+
+def get_view_item_count(uid: int) -> int:
+    """Get the number of items in the current active view."""
+    s = _get(uid)
+    if not s.active_view:
+        return 0
+    return len(s.active_view.index_map)
 
 
 def get_index_map(uid: int) -> dict[str, IndexedItem]:
