@@ -467,10 +467,13 @@ async def _handle_copilot_message(update, context, text: str) -> bool:
     current_path = nav.breadcrumb(uid)
     if current_path:
         context_parts.append(f"Current folder: {current_path}")
-    last_results = nlp_context.get_last_results(context.user_data)
-    if last_results:
-        result_names = [r.get("name", "file") for r in last_results[:5]]
+    # Use the new search context system (single source of truth)
+    active_results, active_query = nlp_context.get_active_results(context.user_data)
+    if active_results:
+        result_names = [r.get("name", "file") for r in active_results[:5]]
         context_parts.append(f"Last shown files: {', '.join(result_names)}")
+        if active_query:
+            context_parts.append(f"Last search query: {active_query}")
     user_context = "; ".join(context_parts)
 
     result = await copilot_llm.extract_intent(
