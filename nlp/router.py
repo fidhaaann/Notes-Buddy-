@@ -459,6 +459,10 @@ def interpret_intent(text: str) -> intent_types.Intent:
 
     idx = normalize.extract_index(normalized)
 
+    # Classify as fresh query or follow-up for downstream handlers
+    query_type = nlp_context.classify_query(normalized)
+    is_fresh = query_type == nlp_context.QueryType.FRESH_QUERY
+
     if any(k in normalized for k in _DOWNLOAD_KEYWORDS):
         return intent_types.Intent(
             intent_types.IntentType.DOWNLOAD,
@@ -467,6 +471,7 @@ def interpret_intent(text: str) -> intent_types.Intent:
             index=idx,
             query=normalized,
             bulk=bulk,
+            is_fresh_query=False,  # downloads are always follow-ups
         )
 
     if any(k in normalized for k in _UPLOAD_KEYWORDS):
@@ -553,7 +558,7 @@ def interpret_intent(text: str) -> intent_types.Intent:
         return intent_types.Intent(intent_types.IntentType.RECENT, 0.85, raw_text=raw)
 
     if any(k in normalized for k in _INFO_KEYWORDS):
-        return intent_types.Intent(intent_types.IntentType.INFO, 0.85, raw_text=raw, index=idx, query=normalized)
+        return intent_types.Intent(intent_types.IntentType.INFO, 0.85, raw_text=raw, index=idx, query=normalized, is_fresh_query=False)
 
     if any(k in normalized for k in _OPEN_KEYWORDS):
         return intent_types.Intent(
@@ -568,7 +573,7 @@ def interpret_intent(text: str) -> intent_types.Intent:
         return intent_types.Intent(intent_types.IntentType.BROWSE, 0.85, raw_text=raw)
 
     if any(k in normalized for k in _SEARCH_KEYWORDS):
-        return intent_types.Intent(intent_types.IntentType.SEARCH, 0.85, raw_text=raw, query=normalized)
+        return intent_types.Intent(intent_types.IntentType.SEARCH, 0.85, raw_text=raw, query=normalized, is_fresh_query=True)
 
     best_action, score = normalize.best_action_token(normalized)
     if best_action and score >= 80:
@@ -602,12 +607,36 @@ def _resolve_last_item(uid: int, user_data: dict, want_folder: bool | None = Non
 
 
 async def _resolve_file_item(uid: int, user_data: dict, intent: intent_types.Intent) -> nav.IndexedItem | None:
+    """Resolve a file reference from the active view.
+
+    Resolution order:
+      1. Numeric index via nav.resolve_smart() (handles numbers, ordinals, names, types)
+      2. Recent file reference (if text mentions 'recent'/'latest')
+      3. Last remembered item (if text has a reference word like 'this'/'that')
+      4. Single file in view auto-select
+    """
     normalized = normalize.normalize_text(intent.raw_text)
     type_hint = _extract_type_hint(normalized)
+
+    # Check if the active view has expired
+    if nav.is_view_expired(uid) and not _mentions_recent(normalized):
+        return None  # caller will handle with a graceful message
+
+    # 1. Try smart resolution (numbers, ordinals, name fragments, types)
     if intent.index:
-        item = nav.resolve_index(uid, intent.index)
+        item = nav.resolve_smart(uid, intent.index)
         if item and not item.is_folder:
             return item
+
+    # Also try resolve_smart with the full text (for ordinal/name references)
+    stripped = _strip_action_words(normalized)
+    if stripped:
+        item = nav.resolve_smart(uid, stripped)
+        if item and not item.is_folder:
+            if not type_hint or _item_matches_type(item, type_hint):
+                return item
+
+    # 2. Recent file reference
     if _mentions_recent(normalized):
         recent = await ds.get_recent_files_async(uid, limit=limits.MAX_RECENT_ITEMS)
         for item in recent:
@@ -621,10 +650,14 @@ async def _resolve_file_item(uid: int, user_data: dict, intent: intent_types.Int
                     full_index="",
                     path="Recent",
                 )
-    if _has_reference_word(normalize.normalize_text(intent.raw_text)) or type_hint:
+
+    # 3. Last remembered item
+    if _has_reference_word(normalized) or type_hint:
         item = _resolve_last_item(uid, user_data, want_folder=False)
         if item and (not type_hint or _item_matches_type(item, type_hint)):
             return item
+
+    # 4. Single file auto-select
     view = await _ensure_file_view(uid)
     if view:
         files = [i for i in view.index_map.values() if not i.is_folder]
@@ -890,7 +923,12 @@ async def _handle_clear(update, context) -> None:
 
 async def _handle_search(update, context, intent: intent_types.Intent) -> None:
     uid = update.effective_user.id
+    assert context.user_data is not None
     query = intent.query or ""
+
+    # ── Always clear previous context on a fresh search ────────────────────
+    nlp_context.clear_search_context(context.user_data)
+
     results = indexed_search.search_index(uid, query)
     if not results:
         suggestions = indexed_search.suggest_files(uid, query)
@@ -917,7 +955,17 @@ async def _handle_search(update, context, intent: intent_types.Intent) -> None:
             shortcut_target_mime_type=None,
             path=f"Search: {query}",
         )
+
+    # ── Store in BOTH nav (for index resolution) and context (for LLM) ────
     nav.set_active_view(uid, "search", index_map, metadata={"keyword": query})
+    nlp_context.set_search_context(
+        context.user_data,
+        results=results,
+        query=query,
+        view_type="search",
+        scope=intent.search_scope or "entire_drive",
+    )
+
     await update.message.reply_text(
         formatter.search_results_indexed(query, index_map),
         reply_markup=ui.back_to_menu_keyboard(),
@@ -978,6 +1026,14 @@ async def _handle_download(update, context, intent: intent_types.Intent) -> None
     if intent.bulk:
         await _handle_bulk_zip(update, context, intent)
         return
+
+    # ── Check if we have active results to resolve against ─────────────────
+    if nav.is_view_expired(uid):
+        # View is stale — check if this is a reference to previous results
+        if intent.index or not intent.is_fresh_query:
+            await update.message.reply_text(formatter.context_expired())
+            return
+
     index = intent.index
     if not index:
         resolved = await _resolve_file_item(uid, context.user_data, intent)
@@ -985,11 +1041,13 @@ async def _handle_download(update, context, intent: intent_types.Intent) -> None
             await _download_item(update, context, resolved)
             _remember_item(context.user_data, resolved)
             return
+        # No active view or can't resolve
+        if not nav.get_active_view(uid):
+            await update.message.reply_text(formatter.no_active_results())
+            return
         candidates = await _file_candidates(uid)
         if not candidates:
-            await update.message.reply_text(
-                formatter.error("Which file?", "Say 'download 1' or 'download the second one'.")
-            )
+            await update.message.reply_text(formatter.ambiguous_reference())
             return
         query = _strip_action_words(normalize.normalize_text(intent.raw_text))
         item, labels = _select_confident_match(query, candidates)
@@ -1000,13 +1058,17 @@ async def _handle_download(update, context, intent: intent_types.Intent) -> None
             await update.message.reply_text(formatter.nlp_suggestions("Closest Files", labels))
             _set_file_suggestion_view(uid, [candidates[m] for m in labels if m in candidates])
             return
-        await update.message.reply_text(
-            formatter.error("Which file?", "Say 'download 1' or 'download the second one'.")
-        )
+        await update.message.reply_text(formatter.ambiguous_reference())
         return
-    item = nav.resolve_index(uid, index)
+
+    # ── Resolve by index with smart matching ───────────────────────────────
+    item = nav.resolve_smart(uid, index)
     if not item or item.is_folder:
-        await update.message.reply_text(formatter.error("Invalid file selection."))
+        item_count = nav.get_view_item_count(uid)
+        if item_count > 0:
+            await update.message.reply_text(formatter.index_out_of_range(item_count))
+        else:
+            await update.message.reply_text(formatter.no_active_results())
         return
     await _download_item(update, context, item)
     _remember_item(context.user_data, item)
@@ -1048,16 +1110,29 @@ async def _download_item(update, context, item: nav.IndexedItem) -> None:
 async def _handle_info(update, context, intent: intent_types.Intent) -> None:
     uid = update.effective_user.id
     assert context.user_data is not None
+
+    # Check for expired view on follow-up references
+    if nav.is_view_expired(uid) and (intent.index or not intent.is_fresh_query):
+        await update.message.reply_text(formatter.context_expired())
+        return
+
     index = intent.index
     if not index:
         item = await _resolve_file_item(uid, context.user_data, intent)
         if not item:
-            await update.message.reply_text(formatter.error("Which file?", "Say 'details of 1'."))
+            if not nav.get_active_view(uid):
+                await update.message.reply_text(formatter.no_active_results())
+            else:
+                await update.message.reply_text(formatter.ambiguous_reference())
             return
     else:
-        item = nav.resolve_index(uid, index)
+        item = nav.resolve_smart(uid, index)
     if not item:
-        await update.message.reply_text(formatter.error("Invalid selection."))
+        item_count = nav.get_view_item_count(uid)
+        if item_count > 0:
+            await update.message.reply_text(formatter.index_out_of_range(item_count))
+        else:
+            await update.message.reply_text(formatter.no_active_results())
         return
     meta = await ds.get_file_metadata_async(uid, item.id)
     meta["_path"] = item.path
@@ -1324,16 +1399,29 @@ async def _handle_bulk_zip(update, context, intent: intent_types.Intent) -> None
 async def _handle_sensitive(update, context, intent: intent_types.Intent) -> None:
     assert context.user_data is not None
     uid = update.effective_user.id
+
+    # Check for expired view on follow-up references
+    if nav.is_view_expired(uid) and (intent.index or not intent.is_fresh_query):
+        await update.message.reply_text(formatter.context_expired())
+        return
+
     index = intent.index
     if not index:
         item = await _resolve_file_item(uid, context.user_data, intent)
         if not item:
-            await update.message.reply_text(formatter.nlp_clarify("Which item?"))
+            if not nav.get_active_view(uid):
+                await update.message.reply_text(formatter.no_active_results())
+            else:
+                await update.message.reply_text(formatter.ambiguous_reference())
             return
     else:
-        item = nav.resolve_index(uid, index)
+        item = nav.resolve_smart(uid, index)
     if not item:
-        await update.message.reply_text(formatter.error("Invalid selection."))
+        item_count = nav.get_view_item_count(uid)
+        if item_count > 0:
+            await update.message.reply_text(formatter.index_out_of_range(item_count))
+        else:
+            await update.message.reply_text(formatter.no_active_results())
         return
     pending = {
         "intent": intent.intent.value,
