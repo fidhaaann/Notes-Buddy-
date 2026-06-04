@@ -59,4 +59,6 @@ class Intent:
     file_type_hint: Optional[str] = None
     suggested_actions: list[str] = field(default_factory=list)
     source: str = "keyword"  # "keyword" or "llm"
+    is_fresh_query: bool = True  # True = new search, False = follow-up reference
+    search_scope: Optional[str] = None  # "entire_drive", "current_folder", folder name, or type filter
 
