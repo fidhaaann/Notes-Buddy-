@@ -40,6 +40,7 @@ class IntentType(str, Enum):
     HELP = "help"
     GREETING = "greeting"
     OFF_TOPIC = "off_topic"
+    SECURITY = "security"
     UNKNOWN = "unknown"
 
 
@@ -61,4 +62,3 @@ class Intent:
     source: str = "keyword"  # "keyword" or "llm"
     is_fresh_query: bool = True  # True = new search, False = follow-up reference
     search_scope: Optional[str] = None  # "entire_drive", "current_folder", folder name, or type filter
-

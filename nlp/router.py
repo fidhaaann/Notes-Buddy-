@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Optional
+from typing import Optional, Any
 
 from rapidfuzz import process, fuzz
 
@@ -921,6 +921,30 @@ async def _handle_clear(update, context) -> None:
     )
 
 
+async def _handle_email(update, context, intent: intent_types.Intent) -> None:
+    if intent.email and update.message:
+        original_text = update.message.text
+        update.message.text = f"/email {intent.email}"
+        await bot_commands.cmd_email(update, context)
+        update.message.text = original_text
+    else:
+        await bot_commands.cmd_email(update, context)
+
+
+async def _handle_verify(update, context, intent: intent_types.Intent) -> None:
+    if intent.otp and update.message:
+        original_text = update.message.text
+        update.message.text = f"/verify {intent.otp}"
+        await bot_commands.cmd_verify(update, context)
+        update.message.text = original_text
+    else:
+        await bot_commands.cmd_verify(update, context)
+
+
+async def _handle_cancel(update, context) -> None:
+    await bot_commands.cmd_cancel(update, context)
+
+
 async def _handle_search(update, context, intent: intent_types.Intent) -> None:
     uid = update.effective_user.id
     assert context.user_data is not None
@@ -1423,7 +1447,7 @@ async def _handle_sensitive(update, context, intent: intent_types.Intent) -> Non
         else:
             await update.message.reply_text(formatter.no_active_results())
         return
-    pending = {
+    pending: dict[str, Any] = {
         "intent": intent.intent.value,
         "file_id": item.id,
         "name": item.name,
@@ -1806,7 +1830,8 @@ async def _execute_pending_action(update, context, pending: dict) -> None:
             return
         meta = await ds.create_share_link_async(uid, file_id, pending.get("share_role", "reader"))
         link = meta.get("webViewLink") or meta.get("webContentLink") or ""
+        name_val = meta.get("name") or pending.get("name", "file") or "file"
         await update.message.reply_text(
-            formatter.share_link(meta.get("name", pending.get("name", "file")), link or "Unavailable")
+            formatter.share_link(str(name_val), link or "Unavailable")
         )
         return

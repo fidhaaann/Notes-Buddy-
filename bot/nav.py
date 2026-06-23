@@ -167,7 +167,7 @@ def set_active_view(
     uid: int,
     view_type: str,
     index_map: dict[str, IndexedItem],
-    metadata: dict = None,
+    metadata: Optional[dict] = None,
 ) -> None:
     """
     Set the active view context.
