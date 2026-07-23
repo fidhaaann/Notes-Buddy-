@@ -5,9 +5,19 @@ import unittest
 
 from bot.commands import _safe_error
 from drive.drive_service import _sanitize_filename, _sanitize_query_value
+from monitoring.logging import _sanitize_text
 
 
 class TestErrorSanitization(unittest.TestCase):
+    def test_telegram_bot_token_redaction(self) -> None:
+        message = (
+            "POST https://api.telegram.org/"
+            "bot123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij/getUpdates"
+        )
+        redacted = _sanitize_text(message)
+        self.assertIn("[REDACTED]", redacted)
+        self.assertNotIn("123456789:", redacted)
+
     def test_oauth_token_redaction(self) -> None:
         error = Exception("Token: ya29.a0AXooCgv-abc123")
         redacted = _safe_error(error)

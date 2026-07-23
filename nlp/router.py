@@ -59,6 +59,16 @@ _HIGH_CONFIDENCE = 0.85
 _MEDIUM_CONFIDENCE = 0.65
 _LOW_CONFIDENCE = 0.5
 
+
+def _contains_keyword(text: str, keyword: str) -> bool:
+    """Match a normalized keyword as whole words, not as a substring."""
+    return re.search(rf"(?<!\w){re.escape(keyword)}(?!\w)", text) is not None
+
+
+def _contains_any(text: str, keywords: set[str]) -> bool:
+    return any(_contains_keyword(text, keyword) for keyword in keywords)
+
+
 _TYPE_ALIASES = {
     "pdf": "pdf",
     "pdfs": "pdf",
@@ -236,15 +246,15 @@ async def _file_candidates(uid: int) -> dict[str, nav.IndexedItem]:
 
 
 def _is_bulk_request(text: str) -> bool:
-    return any(k in text for k in _BULK_KEYWORDS)
+    return _contains_any(text, _BULK_KEYWORDS)
 
 
 def _mentions_recent(text: str) -> bool:
-    return any(k in text for k in _RECENT_REF_WORDS)
+    return _contains_any(text, _RECENT_REF_WORDS)
 
 
 def _has_reference_word(text: str) -> bool:
-    return any(k in text for k in _REFERENCE_WORDS)
+    return _contains_any(text, _REFERENCE_WORDS)
 
 
 def _strip_action_words(text: str, extra: set[str] | None = None) -> str:
@@ -402,22 +412,22 @@ def interpret_intent(text: str) -> intent_types.Intent:
     if normalized in _START_KEYWORDS:
         return intent_types.Intent(intent_types.IntentType.START, 0.95, raw_text=raw)
 
-    if any(k in normalized for k in _HELP_KEYWORDS):
+    if _contains_any(normalized, _HELP_KEYWORDS):
         return intent_types.Intent(intent_types.IntentType.HELP, 0.95, raw_text=raw)
 
-    if any(k in normalized for k in _MENU_KEYWORDS):
+    if _contains_any(normalized, _MENU_KEYWORDS):
         return intent_types.Intent(intent_types.IntentType.MENU, 0.95, raw_text=raw)
 
-    if any(k in normalized for k in _TOOL_KEYWORDS):
+    if _contains_any(normalized, _TOOL_KEYWORDS):
         return intent_types.Intent(intent_types.IntentType.TOOL, 0.95, raw_text=raw)
 
-    if any(k in normalized for k in _LOGIN_KEYWORDS):
+    if _contains_any(normalized, _LOGIN_KEYWORDS):
         return intent_types.Intent(intent_types.IntentType.LOGIN, 0.95, raw_text=raw)
 
-    if any(k in normalized for k in _LOGOUT_KEYWORDS):
+    if _contains_any(normalized, _LOGOUT_KEYWORDS):
         return intent_types.Intent(intent_types.IntentType.LOGOUT, 0.95, raw_text=raw)
 
-    if any(k in normalized for k in _EMAIL_KEYWORDS):
+    if _contains_any(normalized, _EMAIL_KEYWORDS):
         return intent_types.Intent(
             intent_types.IntentType.EMAIL,
             0.9,
@@ -425,7 +435,7 @@ def interpret_intent(text: str) -> intent_types.Intent:
             email=_extract_email(raw),
         )
 
-    if any(k in normalized for k in _VERIFY_KEYWORDS):
+    if _contains_any(normalized, _VERIFY_KEYWORDS):
         return intent_types.Intent(
             intent_types.IntentType.VERIFY,
             0.9,
@@ -433,28 +443,28 @@ def interpret_intent(text: str) -> intent_types.Intent:
             otp=_extract_otp(raw),
         )
 
-    if any(k in normalized for k in _CANCEL_KEYWORDS):
+    if _contains_any(normalized, _CANCEL_KEYWORDS):
         return intent_types.Intent(intent_types.IntentType.CANCEL, 0.9, raw_text=raw)
 
-    if any(k in normalized for k in _CLEAR_KEYWORDS):
+    if _contains_any(normalized, _CLEAR_KEYWORDS):
         return intent_types.Intent(intent_types.IntentType.CLEAR, 0.9, raw_text=raw)
 
-    if any(k in normalized for k in _BACK_KEYWORDS):
+    if _contains_any(normalized, _BACK_KEYWORDS):
         return intent_types.Intent(intent_types.IntentType.BACK, 0.9, raw_text=raw)
 
-    if "current folder" in normalized and any(k in normalized for k in {"show", "list", "browse"}):
+    if "current folder" in normalized and _contains_any(normalized, {"show", "list", "browse"}):
         return intent_types.Intent(intent_types.IntentType.BROWSE, 0.9, raw_text=raw)
 
     if "current folder" in normalized or "current path" in normalized:
         return intent_types.Intent(intent_types.IntentType.PWD, 0.9, raw_text=raw)
 
-    if any(k in normalized for k in _PWD_KEYWORDS):
+    if _contains_any(normalized, _PWD_KEYWORDS):
         return intent_types.Intent(intent_types.IntentType.PWD, 0.9, raw_text=raw)
 
-    if any(k in normalized for k in {"inside", "contents"}):
+    if _contains_any(normalized, {"inside", "contents"}):
         return intent_types.Intent(intent_types.IntentType.BROWSE, 0.85, raw_text=raw)
 
-    if any(k in normalized for k in _INDEX_KEYWORDS):
+    if _contains_any(normalized, _INDEX_KEYWORDS):
         return intent_types.Intent(intent_types.IntentType.INDEX, 0.85, raw_text=raw)
 
     idx = normalize.extract_index(normalized)
@@ -463,7 +473,7 @@ def interpret_intent(text: str) -> intent_types.Intent:
     query_type = nlp_context.classify_query(normalized)
     is_fresh = query_type == nlp_context.QueryType.FRESH_QUERY
 
-    if any(k in normalized for k in _DOWNLOAD_KEYWORDS):
+    if _contains_any(normalized, _DOWNLOAD_KEYWORDS):
         return intent_types.Intent(
             intent_types.IntentType.DOWNLOAD,
             0.9,
@@ -474,7 +484,7 @@ def interpret_intent(text: str) -> intent_types.Intent:
             is_fresh_query=False,  # downloads are always follow-ups
         )
 
-    if any(k in normalized for k in _UPLOAD_KEYWORDS):
+    if _contains_any(normalized, _UPLOAD_KEYWORDS):
         return intent_types.Intent(
             intent_types.IntentType.UPLOAD,
             0.85,
@@ -482,7 +492,12 @@ def interpret_intent(text: str) -> intent_types.Intent:
             target_name=_extract_target(normalized),
         )
 
-    if any(k in normalized for k in _DELETE_KEYWORDS):
+    # Compound removal phrases must win over the generic "remove" delete verb
+    # and the generic "favorites" list keyword below.
+    if _contains_any(normalized, _UNFAVORITE_KEYWORDS):
+        return intent_types.Intent(intent_types.IntentType.UNFAVORITE, 0.85, raw_text=raw, index=idx, query=normalized)
+
+    if _contains_any(normalized, _DELETE_KEYWORDS):
         return intent_types.Intent(
             intent_types.IntentType.DELETE,
             0.9,
@@ -493,10 +508,10 @@ def interpret_intent(text: str) -> intent_types.Intent:
             bulk=bulk,
         )
 
-    if any(k in normalized for k in _RENAME_KEYWORDS):
+    if _contains_any(normalized, _RENAME_KEYWORDS):
         return intent_types.Intent(intent_types.IntentType.RENAME, 0.9, raw_text=raw, index=idx, query=normalized, needs_confirmation=True)
 
-    if any(k in normalized for k in _MOVE_KEYWORDS):
+    if _contains_any(normalized, _MOVE_KEYWORDS):
         return intent_types.Intent(
             intent_types.IntentType.MOVE,
             0.9,
@@ -507,7 +522,7 @@ def interpret_intent(text: str) -> intent_types.Intent:
             bulk=bulk,
         )
 
-    if any(k in normalized for k in _COPY_KEYWORDS):
+    if _contains_any(normalized, _COPY_KEYWORDS):
         return intent_types.Intent(
             intent_types.IntentType.COPY,
             0.9,
@@ -518,7 +533,7 @@ def interpret_intent(text: str) -> intent_types.Intent:
             bulk=bulk,
         )
 
-    if any(k in normalized for k in _SHARE_KEYWORDS):
+    if _contains_any(normalized, _SHARE_KEYWORDS):
         return intent_types.Intent(
             intent_types.IntentType.SHARE,
             0.9,
@@ -528,7 +543,7 @@ def interpret_intent(text: str) -> intent_types.Intent:
             needs_confirmation=True,
         )
 
-    if any(k in normalized for k in _ZIP_KEYWORDS):
+    if _contains_any(normalized, _ZIP_KEYWORDS):
         return intent_types.Intent(
             intent_types.IntentType.ZIP,
             0.85,
@@ -537,7 +552,7 @@ def interpret_intent(text: str) -> intent_types.Intent:
             bulk=bulk,
         )
 
-    if any(k in normalized for k in _MKDIR_KEYWORDS):
+    if _contains_any(normalized, _MKDIR_KEYWORDS):
         return intent_types.Intent(
             intent_types.IntentType.MKDIR,
             0.85,
@@ -545,22 +560,19 @@ def interpret_intent(text: str) -> intent_types.Intent:
             target_name=_extract_folder_name(raw) or _extract_folder_name(normalized),
         )
 
-    if any(k in normalized for k in _FAVORITES_LIST_KEYWORDS):
+    if _contains_any(normalized, _FAVORITES_LIST_KEYWORDS):
         return intent_types.Intent(intent_types.IntentType.FAVORITES, 0.9, raw_text=raw)
 
-    if any(k in normalized for k in _UNFAVORITE_KEYWORDS):
-        return intent_types.Intent(intent_types.IntentType.UNFAVORITE, 0.85, raw_text=raw, index=idx, query=normalized)
-
-    if any(k in normalized for k in _FAVORITE_KEYWORDS):
+    if _contains_any(normalized, _FAVORITE_KEYWORDS):
         return intent_types.Intent(intent_types.IntentType.FAVORITE, 0.85, raw_text=raw, index=idx, query=normalized)
 
-    if any(k in normalized for k in _RECENT_KEYWORDS):
+    if _contains_any(normalized, _RECENT_KEYWORDS):
         return intent_types.Intent(intent_types.IntentType.RECENT, 0.85, raw_text=raw)
 
-    if any(k in normalized for k in _INFO_KEYWORDS):
+    if _contains_any(normalized, _INFO_KEYWORDS):
         return intent_types.Intent(intent_types.IntentType.INFO, 0.85, raw_text=raw, index=idx, query=normalized, is_fresh_query=False)
 
-    if any(k in normalized for k in _OPEN_KEYWORDS):
+    if _contains_any(normalized, _OPEN_KEYWORDS):
         return intent_types.Intent(
             intent_types.IntentType.OPEN_FOLDER,
             0.85,
@@ -572,7 +584,7 @@ def interpret_intent(text: str) -> intent_types.Intent:
     if re.fullmatch(r"(list|browse|show files|show folders|show current folder)", normalized):
         return intent_types.Intent(intent_types.IntentType.BROWSE, 0.85, raw_text=raw)
 
-    if any(k in normalized for k in _SEARCH_KEYWORDS):
+    if _contains_any(normalized, _SEARCH_KEYWORDS):
         return intent_types.Intent(intent_types.IntentType.SEARCH, 0.85, raw_text=raw, query=normalized, is_fresh_query=True)
 
     best_action, score = normalize.best_action_token(normalized)

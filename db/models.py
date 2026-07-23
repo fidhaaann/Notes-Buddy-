@@ -677,7 +677,9 @@ def update_task_job(
         return
     with get_connection() as conn:
         conn.execute(
-            f"UPDATE task_jobs SET {', '.join(updates)} WHERE id = ?",
+            # Every SQL fragment is selected from the fixed column list above;
+            # all caller-controlled values remain parameterized.
+            f"UPDATE task_jobs SET {', '.join(updates)} WHERE id = ?",  # nosec B608
             params,
         )
 

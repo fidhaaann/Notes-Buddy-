@@ -165,10 +165,6 @@ RECOMMENDED ACTIONS:
 1. Review audit logs for this user
 2. Check for other suspicious patterns
 3. Contact user to verify if authorized
-
-Database Query:
-SELECT * FROM audit_log WHERE telegram_id = {telegram_id} ORDER BY created_at DESC;
-SELECT * FROM security_alerts WHERE telegram_id = {telegram_id} ORDER BY created_at DESC;
 """
     
     if ADMIN_EMAIL:

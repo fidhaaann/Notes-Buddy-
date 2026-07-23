@@ -47,7 +47,8 @@ logger = logging.getLogger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-HOST      = os.environ.get("HOST", "0.0.0.0")
+# Public PaaS deployments require binding on every container interface.
+HOST      = os.environ.get("HOST", "0.0.0.0")  # nosec B104
 PORT      = int(os.environ.get("PORT", "8000"))
 
 # ── Globals set after bot starts ──────────────────────────────────────────────

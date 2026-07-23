@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from monitoring import context
 
 _SENSITIVE_PATTERNS = [
+    re.compile(r"\d{6,12}:[A-Za-z0-9_-]{30,}\b"),  # Telegram bot tokens
     re.compile(r"ya29\.[A-Za-z0-9_-]{20,}"),
     re.compile(r"gAAAAA[A-Za-z0-9_/+-]{20,}"),
     re.compile(r"(?<=['\"\\s=:])[A-Za-z0-9_/+-]{40,}"),

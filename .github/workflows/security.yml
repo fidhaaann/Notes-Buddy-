@@ -21,6 +21,9 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt -r requirements-dev.txt
 
+      - name: Unit tests
+        run: python -m unittest discover -s tests -v
+
       - name: Dependency audit (pip-audit)
         run: pip-audit -r requirements.txt
 
@@ -28,7 +31,7 @@ jobs:
         run: safety check -r requirements.txt --full-report
 
       - name: Static security scan (bandit)
-        run: bandit -r . -x venv,.venv,__pycache__,tests,temp
+        run: bandit -r . -x venv,.venv,__pycache__,tests,temp -ll
 
       - name: Secret scanning (gitleaks)
         uses: gitleaks/gitleaks-action@v2

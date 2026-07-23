@@ -87,6 +87,10 @@ class TestNlpIntent(unittest.TestCase):
         intent = router.interpret_intent("duplicate this file")
         self.assertEqual(intent.intent, intents.IntentType.COPY)
 
+    def test_copy_is_not_mistaken_for_up_navigation(self) -> None:
+        intent = router.interpret_intent("duplicate report.pdf")
+        self.assertEqual(intent.intent, intents.IntentType.COPY)
+
     def test_bulk_delete_intent(self) -> None:
         intent = router.interpret_intent("delete all temporary files")
         self.assertEqual(intent.intent, intents.IntentType.DELETE)
@@ -101,6 +105,11 @@ class TestNlpIntent(unittest.TestCase):
         intent = router.interpret_intent("move these files to semester 4")
         self.assertEqual(intent.intent, intents.IntentType.MOVE)
         self.assertTrue(intent.bulk)
+
+    def test_called_does_not_trigger_bulk_all(self) -> None:
+        intent = router.interpret_intent("create folder called DBMS")
+        self.assertEqual(intent.intent, intents.IntentType.MKDIR)
+        self.assertFalse(intent.bulk)
 
 
 if __name__ == "__main__":
