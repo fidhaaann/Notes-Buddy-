@@ -25,6 +25,7 @@ from googleapiclient.errors import HttpError
 
 from drive import drive_service as ds
 from bot import formatter, ui, nav
+from bot.dialogue import publish_active_view_to_dialogue
 from db import models
 from services.parser import human_size
 from services import anomaly_detection
@@ -134,7 +135,7 @@ async def _require_stepup(uid: int, action_label: str, query, update, context) -
     return False
 
 
-async def _send_browse(uid: int, query, update) -> None:
+async def _send_browse(uid: int, query, update, context=None) -> None:
     """Fetch current folder contents and send as a new message."""
     try:
         with timing.timed("cb_browse"):
@@ -173,6 +174,12 @@ async def _send_browse(uid: int, query, update) -> None:
             
             # Set as active view: folder browsing context
             nav.set_active_view(uid, "folder", index_map, metadata={"folder_id": fid})
+            if context is not None:
+                publish_active_view_to_dialogue(
+                    update,
+                    context,
+                    authenticated=True,
+                )
             
             text = formatter.directory_listing(path, index_map, folders, files)
             if listing.error_count or listing.truncated:
@@ -207,7 +214,7 @@ async def _send_browse(uid: int, query, update) -> None:
         ))
 
 
-async def _send_recent(uid: int, query, update) -> None:
+async def _send_recent(uid: int, query, update, context=None) -> None:
     """Fetch recent files and send as a new message."""
     try:
         recent = await ds.get_recent_files_async(uid, limit=limits.MAX_RECENT_ITEMS)
@@ -227,6 +234,12 @@ async def _send_recent(uid: int, query, update) -> None:
                 path="Recent",
             )
         nav.set_active_view(uid, "recent", index_map)
+        if context is not None:
+            publish_active_view_to_dialogue(
+                update,
+                context,
+                authenticated=True,
+            )
         await _reply(
             query,
             update,
@@ -269,14 +282,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 await _reply(query, update, formatter.already_home())
             else:
                 nav.go_home(uid)
-                await _send_browse(uid, query, update)
+                await _send_browse(uid, query, update, context)
 
         elif action == "back":
             nav.pop_folder(uid)
-            await _send_browse(uid, query, update)
+            await _send_browse(uid, query, update, context)
 
         elif action in ("browse", "refresh"):
-            await _send_browse(uid, query, update)
+            await _send_browse(uid, query, update, context)
 
         elif action == "menu":
             await _reply(
@@ -352,7 +365,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             if not _is_authenticated(uid):
                 await _reply(query, update, formatter.login_required())
                 return
-            await _send_recent(uid, query, update)
+            await _send_recent(uid, query, update, context)
 
         elif action == "mkdir":
             await _reply(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Optional, Any
 
@@ -9,6 +10,7 @@ from rapidfuzz import process, fuzz
 
 from bot import commands as bot_commands
 from bot import formatter, nav, ui
+from bot.dialogue import publish_active_view_to_dialogue
 from db import models
 from drive import auth as drive_auth
 from drive import drive_service as ds
@@ -20,6 +22,8 @@ from security import validators, limits
 from services import anomaly_detection, stepup_auth
 from services import parser as parser_utils
 from tasks.manager import get_task_manager
+
+logger = logging.getLogger(__name__)
 
 
 _START_KEYWORDS = {"start", "get started", "begin", "launch"}
@@ -971,7 +975,13 @@ async def _handle_search(update, context, intent: intent_types.Intent) -> None:
         if suggestions:
             labels = [s["name"] for s in suggestions]
             await update.message.reply_text(formatter.nlp_suggestions("Closest Matches", labels))
-            _set_suggestion_view(uid, suggestions, label_prefix="Match")
+            _set_suggestion_view(
+                uid,
+                suggestions,
+                label_prefix="Match",
+                update=update,
+                context=context,
+            )
             return
         await update.message.reply_text(formatter.nlp_no_results(query))
         return
@@ -994,6 +1004,7 @@ async def _handle_search(update, context, intent: intent_types.Intent) -> None:
 
     # ── Store in BOTH nav (for index resolution) and context (for LLM) ────
     nav.set_active_view(uid, "search", index_map, metadata={"keyword": query})
+    publish_active_view_to_dialogue(update, context, authenticated=True)
     nlp_context.set_search_context(
         context.user_data,
         results=results,
@@ -1040,7 +1051,12 @@ async def _handle_open_folder(update, context, intent: intent_types.Intent) -> N
     if not item:
         if labels:
             await update.message.reply_text(formatter.nlp_suggestions("Closest Folders", labels))
-            _set_folder_suggestion_view(uid, [candidates[m] for m in labels if m in candidates])
+            _set_folder_suggestion_view(
+                uid,
+                [candidates[m] for m in labels if m in candidates],
+                update,
+                context,
+            )
             return
         await update.message.reply_text(formatter.error("No matching folder found."))
         return
@@ -1054,6 +1070,51 @@ async def _handle_open_folder(update, context, intent: intent_types.Intent) -> N
     nav.push_folder(uid, target_id, item.name)
     _remember_item(context.user_data, item)
     await _handle_browse(update, context)
+
+
+async def open_resolved_folder(update, context, item: nav.IndexedItem) -> bool:
+    """Open one immutable pre-resolved folder through the existing browse path."""
+    uid = update.effective_user.id
+    if not item.is_folder:
+        await update.message.reply_text(
+            formatter.error("That item is a file, not a folder.")
+        )
+        return False
+    if item.is_shortcut:
+        if not item.shortcut_target_id:
+            await update.message.reply_text(
+                formatter.error(
+                    "Shortcut target is unavailable.",
+                    "Try opening the item directly in Google Drive.",
+                )
+            )
+            return False
+        target_id = item.shortcut_target_id
+    else:
+        target_id = item.id
+    if nav.is_in_stack(uid, target_id):
+        await update.message.reply_text(
+            formatter.error(
+                "Navigation loop detected.",
+                "Folder is already in your path.",
+            )
+        )
+        return False
+    nav.push_folder(uid, target_id, item.name)
+    try:
+        _remember_item(context.user_data, item)
+        await _handle_browse(update, context)
+        return True
+    except Exception:
+        nav.pop_folder(uid)
+        logger.exception("resolved folder open failed")
+        await update.message.reply_text(
+            formatter.error(
+                "Could not open that folder.",
+                "Please refresh the list and try again.",
+            )
+        )
+        return False
 
 
 async def _handle_download(update, context, intent: intent_types.Intent) -> None:
@@ -1092,7 +1153,12 @@ async def _handle_download(update, context, intent: intent_types.Intent) -> None
             return
         if labels:
             await update.message.reply_text(formatter.nlp_suggestions("Closest Files", labels))
-            _set_file_suggestion_view(uid, [candidates[m] for m in labels if m in candidates])
+            _set_file_suggestion_view(
+                uid,
+                [candidates[m] for m in labels if m in candidates],
+                update,
+                context,
+            )
             return
         await update.message.reply_text(formatter.ambiguous_reference())
         return
@@ -1143,6 +1209,33 @@ async def _download_item(update, context, item: nav.IndexedItem) -> None:
     )
 
 
+async def download_resolved_item(
+    update,
+    context,
+    item: nav.IndexedItem,
+) -> None:
+    """Reuse the existing secured download path for a typed resolved item."""
+    await _download_item(update, context, item)
+    _remember_item(context.user_data, item)
+
+
+async def show_resolved_item_details(
+    update,
+    context,
+    item: nav.IndexedItem,
+) -> None:
+    """Reuse the existing metadata/details path for a typed resolved item."""
+    uid = update.effective_user.id
+    meta = await ds.get_file_metadata_async(uid, item.id)
+    meta["_path"] = item.path
+    is_fav = models.is_favorite(uid, item.id)
+    await update.message.reply_text(
+        formatter.file_info(meta),
+        reply_markup=ui.file_actions_keyboard(item.id, is_fav),
+    )
+    _remember_item(context.user_data, item)
+
+
 async def _handle_info(update, context, intent: intent_types.Intent) -> None:
     uid = update.effective_user.id
     assert context.user_data is not None
@@ -1170,14 +1263,7 @@ async def _handle_info(update, context, intent: intent_types.Intent) -> None:
         else:
             await update.message.reply_text(formatter.no_active_results())
         return
-    meta = await ds.get_file_metadata_async(uid, item.id)
-    meta["_path"] = item.path
-    is_fav = models.is_favorite(uid, item.id)
-    await update.message.reply_text(
-        formatter.file_info(meta),
-        reply_markup=ui.file_actions_keyboard(item.id, is_fav),
-    )
-    _remember_item(context.user_data, item)
+    await show_resolved_item_details(update, context, item)
 
 
 async def _handle_upload_hint(update, context, intent: intent_types.Intent) -> None:
@@ -1248,6 +1334,7 @@ async def _handle_recent(update, context) -> None:
         return
     index_map = _build_index_map(uid, recent, "Recent")
     nav.set_active_view(uid, "recent", index_map)
+    publish_active_view_to_dialogue(update, context, authenticated=True)
     await update.message.reply_text(
         formatter.recent_results(index_map),
         reply_markup=ui.back_to_menu_keyboard(),
@@ -1268,6 +1355,7 @@ async def _handle_favorites(update, context) -> None:
             continue
     index_map = _build_index_map(uid, files, "Favorites")
     nav.set_active_view(uid, "favorites", index_map)
+    publish_active_view_to_dialogue(update, context, authenticated=True)
     await update.message.reply_text(
         formatter.favorites_results(index_map),
         reply_markup=ui.back_to_menu_keyboard(),
@@ -1538,11 +1626,18 @@ async def _handle_browse(update, context) -> None:
         )
     index_map = nav.build_flat_index_map(uid, folders, files)
     nav.set_active_view(uid, "folder", index_map, metadata={"folder_id": fid})
+    publish_active_view_to_dialogue(update, context, authenticated=True)
     text = formatter.directory_listing(nav.breadcrumb(uid), index_map, folders, files)
     await update.message.reply_text(text, reply_markup=ui.browse_keyboard(is_root=(fid == "root")))
 
 
-def _set_suggestion_view(uid: int, suggestions: list[dict], label_prefix: str) -> None:
+def _set_suggestion_view(
+    uid: int,
+    suggestions: list[dict],
+    label_prefix: str,
+    update=None,
+    context=None,
+) -> None:
     index_map: dict[str, nav.IndexedItem] = {}
     for i, item in enumerate(suggestions, 1):
         idx = str(i)
@@ -1559,9 +1654,16 @@ def _set_suggestion_view(uid: int, suggestions: list[dict], label_prefix: str) -
             path=f"{label_prefix} Suggestions",
         )
     nav.set_active_view(uid, "nlp_suggestions", index_map)
+    if update is not None and context is not None:
+        publish_active_view_to_dialogue(update, context, authenticated=True)
 
 
-def _set_file_suggestion_view(uid: int, items: list[nav.IndexedItem]) -> None:
+def _set_file_suggestion_view(
+    uid: int,
+    items: list[nav.IndexedItem],
+    update=None,
+    context=None,
+) -> None:
     index_map: dict[str, nav.IndexedItem] = {}
     for i, item in enumerate(items, 1):
         idx = str(i)
@@ -1578,9 +1680,16 @@ def _set_file_suggestion_view(uid: int, items: list[nav.IndexedItem]) -> None:
             path="File Suggestions",
         )
     nav.set_active_view(uid, "nlp_file_suggestions", index_map)
+    if update is not None and context is not None:
+        publish_active_view_to_dialogue(update, context, authenticated=True)
 
 
-def _set_folder_suggestion_view(uid: int, items: list[nav.IndexedItem]) -> None:
+def _set_folder_suggestion_view(
+    uid: int,
+    items: list[nav.IndexedItem],
+    update=None,
+    context=None,
+) -> None:
     index_map: dict[str, nav.IndexedItem] = {}
     for i, item in enumerate(items, 1):
         idx = str(i)
@@ -1597,6 +1706,8 @@ def _set_folder_suggestion_view(uid: int, items: list[nav.IndexedItem]) -> None:
             path="Folder Suggestions",
         )
     nav.set_active_view(uid, "nlp_folder_suggestions", index_map)
+    if update is not None and context is not None:
+        publish_active_view_to_dialogue(update, context, authenticated=True)
 
 
 def _extract_after_to(text: str) -> str | None:

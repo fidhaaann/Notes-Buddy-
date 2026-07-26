@@ -49,6 +49,7 @@ from bot.commands import (
     cmd_index,
 )
 from bot.callbacks import handle_callback
+from bot.dialogue import handle_active_result_selection
 from bot.errors import handle_error
 from bot import formatter, nav, ui
 from db import models
@@ -255,12 +256,13 @@ async def handle_text_input(update, context) -> None:
       2. Pending slot-fill from copilot
       3. Pending action from keyword router (unchanged)
       4. Passive email capture (unchanged)
-      5. Copilot AI layer:
+      5. Deterministic active-result selection
+      6. Copilot AI layer:
          a. Greeting gate (fast regex, no LLM)
          b. LLM intent extraction via Gemini
          c. Slot filling check
          d. Execute via router.execute_intent()
-      6. Keyword NLP fallback (if Gemini unavailable)
+      7. Keyword NLP fallback (if Gemini unavailable)
     """
     if not update.message or not update.message.text:
         return
@@ -416,6 +418,13 @@ async def handle_text_input(update, context) -> None:
             await update.message.reply_text(
                 formatter.error("Failed to update email.", "Please try again later.")
             )
+        return
+
+    if await handle_active_result_selection(
+        update,
+        context,
+        authenticated=is_authenticated,
+    ):
         return
 
     # ── Copilot AI layer ──────────────────────────────────────────────────

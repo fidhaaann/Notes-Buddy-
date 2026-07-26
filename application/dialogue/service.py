@@ -150,6 +150,37 @@ class DialogueSessionService:
             active_result_set=None,
         )
 
+    def synchronize_folder_path(
+        self,
+        session_key: ClientSessionIdentity,
+        locations: Iterable[FolderLocation],
+    ) -> DialogueSession:
+        """Replace the typed path from a trusted compatibility snapshot."""
+        path = tuple(locations)
+        if not path:
+            raise InvalidDialogueValue("folder path must contain at least Home")
+        if not all(isinstance(location, FolderLocation) for location in path):
+            raise InvalidDialogueValue(
+                "folder path must contain FolderLocation values"
+            )
+        item_ids = [location.item_id for location in path]
+        if len(item_ids) != len(set(item_ids)):
+            raise NavigationLoop("folder path contains a duplicate folder ID")
+        session = self.get_session(session_key)
+        desired_current = path[-1]
+        desired_history = path[:-1]
+        if (
+            session.current_folder == desired_current
+            and session.folder_history == desired_history
+        ):
+            return session
+        return self._mutate(
+            session,
+            current_folder=desired_current,
+            folder_history=desired_history,
+            active_result_set=None,
+        )
+
     def replace_active_results(
         self,
         session_key: ClientSessionIdentity,

@@ -5,6 +5,10 @@ import unittest
 from unittest.mock import patch
 
 from bot import commands, nav
+from bot.dialogue import (
+    initialize_dialogue_service,
+    telegram_session_identity_from_update,
+)
 from nlp import context as nlp_context
 from nlp import router
 from nlp.intents import Intent, IntentType
@@ -46,10 +50,11 @@ class SearchContextSeparationCharacterizationTests(unittest.IsolatedAsyncioTestC
     def tearDown(self) -> None:
         nav._sessions.clear()
 
-    async def test_command_search_populates_navigation_view_only(self) -> None:
-        """Current /search does not populate nlp.context SearchContext."""
+    async def test_command_search_populates_navigation_and_typed_but_not_nlp_context(self) -> None:
+        """Current /search still does not populate nlp.context SearchContext."""
         uid = 101
         update, context = make_update_context(uid, "/search dbms")
+        service = initialize_dialogue_service(context.application)
 
         with (
             patch.object(commands, "_is_authenticated", return_value=True),
@@ -67,10 +72,16 @@ class SearchContextSeparationCharacterizationTests(unittest.IsolatedAsyncioTestC
         self.assertEqual(active_view.view_type, "search")
         self.assertEqual(nav.resolve_index(uid, "1").id, "dbms-1")
         self.assertIsNone(nlp_context.get_search_context(context.user_data))
+        identity = telegram_session_identity_from_update(update)
+        self.assertEqual(
+            service.resolve_selection(identity, 1).item_id,
+            "dbms-1",
+        )
 
     async def test_command_search_replaces_nav_but_leaves_existing_nlp_context_stale(self) -> None:
         uid = 101
         update, context = make_update_context(uid, "/search new")
+        initialize_dialogue_service(context.application)
         nlp_context.set_search_context(
             context.user_data,
             _search_results("old"),
@@ -96,6 +107,7 @@ class SearchContextSeparationCharacterizationTests(unittest.IsolatedAsyncioTestC
     async def test_nlp_search_currently_populates_both_context_stores(self) -> None:
         uid = 101
         update, context = make_update_context(uid, "find dbms")
+        service = initialize_dialogue_service(context.application)
         intent = Intent(
             intent=IntentType.SEARCH,
             confidence=0.9,
@@ -115,6 +127,11 @@ class SearchContextSeparationCharacterizationTests(unittest.IsolatedAsyncioTestC
         results, query = nlp_context.get_active_results(context.user_data)
         self.assertEqual(query, "dbms")
         self.assertEqual([item["file_id"] for item in results], ["dbms-1", "dbms-2"])
+        identity = telegram_session_identity_from_update(update)
+        self.assertEqual(
+            service.resolve_selection(identity, 2).item_id,
+            "dbms-2",
+        )
 
     def test_replacing_navigation_view_does_not_synchronize_nlp_search_context(self) -> None:
         user_data: dict = {}

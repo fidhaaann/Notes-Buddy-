@@ -5,6 +5,10 @@ from unittest.mock import AsyncMock, patch
 
 from bot import handlers, nav
 from bot.commands import cmd_cancel
+from bot.dialogue import (
+    initialize_dialogue_service,
+    publish_active_view_to_dialogue,
+)
 from copilot import slot_filler
 from nlp import normalize, router
 from nlp.intents import Intent, IntentType
@@ -43,11 +47,17 @@ class OrdinaryTextRoutingCharacterizationTests(unittest.IsolatedAsyncioTestCase)
     def tearDown(self) -> None:
         nav._sessions.clear()
 
-    async def test_plain_numeric_reply_currently_reaches_copilot_before_selection(self) -> None:
-        """Known gap: active-view selection is not a pre-Copilot routing stage."""
+    async def test_plain_numeric_reply_resolves_before_copilot(self) -> None:
+        """Enabled migration behavior at the real ordinary-text routing seam."""
         uid = 101
         nav.set_active_view(uid, "folder", {"1": _folder()})
         update, context = make_update_context(uid, "1")
+        initialize_dialogue_service(context.application)
+        publish_active_view_to_dialogue(
+            update,
+            context,
+            authenticated=True,
+        )
 
         with (
             patch("bot.commands._is_authenticated", return_value=True),
@@ -66,14 +76,18 @@ class OrdinaryTextRoutingCharacterizationTests(unittest.IsolatedAsyncioTestCase)
                 "handle_nlp_message",
                 new=AsyncMock(return_value=True),
             ) as keyword_nlp,
-            patch("bot.nav.resolve_index", wraps=nav.resolve_index) as resolve_index,
+            patch.object(
+                handlers.nlp_router,
+                "open_resolved_folder",
+                new=AsyncMock(return_value=True),
+            ) as open_folder,
         ):
             await handlers.handle_text_input(update, context)
 
         pending_action.assert_awaited_once()
-        copilot.assert_awaited_once_with(update, context, "1")
+        open_folder.assert_awaited_once()
+        copilot.assert_not_awaited()
         keyword_nlp.assert_not_awaited()
-        resolve_index.assert_not_called()
 
     def test_action_phrases_have_index_extraction_helpers(self) -> None:
         self.assertEqual(normalize.extract_index("download 2"), "2")
@@ -87,14 +101,6 @@ class OrdinaryTextRoutingCharacterizationTests(unittest.IsolatedAsyncioTestCase)
         self.assertEqual(download.index, "2")
         self.assertEqual(open_folder.intent, IntentType.OPEN_FOLDER)
         self.assertIsNone(open_folder.index)
-
-    @unittest.skip(
-        "Expected target behavior: pure numeric/ordinal selections resolve against the "
-        "active result set before Copilot or keyword NLP."
-    )
-    async def test_target_plain_numeric_reply_opens_selected_folder_before_nlp(self) -> None:
-        self.fail("Enable after deterministic selection is wired into text routing")
-
 
 class PendingSlotCharacterizationTests(unittest.IsolatedAsyncioTestCase):
     async def test_pending_copilot_slot_is_filled_before_general_nlp(self) -> None:

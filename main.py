@@ -35,6 +35,7 @@ from db.models import init_db, cleanup_expired_states
 from db import models
 from bot.handlers import register_handlers
 from bot import nav
+from bot.dialogue import initialize_dialogue_service
 from drive.auth import exchange_code
 from monitoring import logging as logging_config
 from monitoring import context as monitoring_context
@@ -239,6 +240,7 @@ def build_bot() -> Application:
         .rate_limiter(AIORateLimiter(max_retries=3))
         .build()
     )
+    initialize_dialogue_service(app)
     register_handlers(app)
     return app
 

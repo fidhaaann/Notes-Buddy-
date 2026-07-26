@@ -94,6 +94,25 @@ def file_actions_keyboard(file_id: str, is_fav: bool = False) -> InlineKeyboardM
 
 # ── Confirmation keyboards ───────────────────────────────────────────────────
 
+def selection_file_actions_keyboard(
+    file_id: str,
+) -> InlineKeyboardMarkup:
+    """Focused actions for FileSelectionBehavior.ASK."""
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "Download",
+                callback_data=f"file:download:{file_id}",
+            ),
+            InlineKeyboardButton(
+                "Details",
+                callback_data=f"file:info:{file_id}",
+            ),
+        ],
+        [InlineKeyboardButton("Cancel", callback_data="nav:menu")],
+    ])
+
+
 def confirm_keyboard(action: str, target_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[
         InlineKeyboardButton("✅ Yes", callback_data=f"confirm:{action}:{target_id}"),

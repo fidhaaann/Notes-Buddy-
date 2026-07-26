@@ -123,6 +123,22 @@ class DialogueSessionServiceTests(unittest.TestCase):
         self.assertEqual(home.folder_history, ())
         self.assertIsNone(home.active_result_set)
 
+    def test_compatibility_path_synchronization_is_atomic_and_idempotent(self) -> None:
+        key = _key()
+        self.service.get_or_create_session(key)
+        path = (
+            FolderLocation.home(),
+            FolderLocation("folder-1", "Projects", parent_id="root"),
+        )
+
+        synchronized = self.service.synchronize_folder_path(key, path)
+        repeated = self.service.synchronize_folder_path(key, path)
+
+        self.assertEqual(synchronized.current_folder, path[-1])
+        self.assertEqual(synchronized.folder_history, path[:-1])
+        self.assertEqual(synchronized.state_version, 2)
+        self.assertIs(repeated, synchronized)
+
     def test_result_replacement_creates_new_id_and_increments_result_version(self) -> None:
         key = _key()
         self.service.get_or_create_session(key)

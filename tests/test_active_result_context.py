@@ -204,13 +204,6 @@ class ActiveViewCharacterizationTests(unittest.TestCase):
         self.assertEqual(dialogue.get_default_action(folder), "open")
         self.assertEqual(dialogue.get_default_action(file_item), "download")
 
-    @unittest.skip(
-        "Target file-selection behavior is configurable; current helper hard-codes download."
-    )
-    def test_target_file_default_is_selected_from_user_preference(self) -> None:
-        self.fail("Enable after file-selection preference is introduced")
-
-
 class NavigationExpiryCharacterizationTests(unittest.TestCase):
     def setUp(self) -> None:
         nav._sessions.clear()

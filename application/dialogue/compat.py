@@ -114,6 +114,36 @@ def active_view_to_result_items(
     )
 
 
+def result_item_to_indexed_item(
+    item: ResultItem,
+    *,
+    path: str = "",
+) -> nav.IndexedItem:
+    """Create a legacy execution value from an already-resolved typed item."""
+    shortcut_is_folder = (
+        item.item_kind is ItemKind.SHORTCUT
+        and item.shortcut_target_kind is ItemKind.FOLDER
+    )
+    return nav.IndexedItem(
+        id=item.item_id,
+        name=item.name_snapshot,
+        mime_type=item.mime_type or "",
+        is_folder=item.item_kind is ItemKind.FOLDER or shortcut_is_folder,
+        parent_index="",
+        full_index=str(item.ordinal),
+        is_shortcut=item.item_kind is ItemKind.SHORTCUT,
+        shortcut_target_id=item.shortcut_target_id,
+        shortcut_target_mime_type=(
+            nav.FOLDER_MIME
+            if item.shortcut_target_kind is ItemKind.FOLDER
+            else item.mime_type
+            if item.shortcut_target_kind is ItemKind.FILE
+            else None
+        ),
+        path=path,
+    )
+
+
 def folder_stack_to_locations(
     stack: Iterable[tuple[str, str]],
     *,

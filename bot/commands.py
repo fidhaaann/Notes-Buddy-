@@ -28,6 +28,7 @@ from drive import auth as drive_auth
 from drive import drive_service as ds
 from bot import formatter, ui
 from bot import nav
+from bot.dialogue import publish_active_view_to_dialogue
 from services import parser as p
 from services import anomaly_detection
 from services import stepup_auth
@@ -271,6 +272,7 @@ async def cmd_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             
             # Set as active view: folder browsing context
             nav.set_active_view(uid, "folder", index_map, metadata={"folder_id": fid})
+            publish_active_view_to_dialogue(update, context, authenticated=True)
 
             text = formatter.directory_listing(path, index_map, folders, files)
             if listing.error_count or listing.truncated:
@@ -677,6 +679,11 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                             path="Suggestions",
                         )
                     nav.set_active_view(uid, "search_suggestions", index_map, metadata={"keyword": keyword})
+                    publish_active_view_to_dialogue(
+                        update,
+                        context,
+                        authenticated=True,
+                    )
                     await _msg(update).reply_text(
                         formatter.nlp_suggestions("Closest Matches", labels),
                         reply_markup=ui.back_to_menu_keyboard(),
@@ -707,6 +714,7 @@ async def cmd_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
             # Set as active view: search results context
             nav.set_active_view(uid, "search", index_map, metadata={"keyword": keyword})
+            publish_active_view_to_dialogue(update, context, authenticated=True)
 
             await _msg(update).reply_text(
                 formatter.search_results_indexed(keyword, index_map),

@@ -132,6 +132,11 @@ def breadcrumb(uid: int) -> str:
     return " > ".join(name for _, name in _get(uid).stack)
 
 
+def get_folder_stack(uid: int) -> tuple[tuple[str, str], ...]:
+    """Return an immutable snapshot of the current legacy folder path."""
+    return tuple(_get(uid).stack)
+
+
 def push_folder(uid: int, folder_id: str, folder_name: str) -> None:
     s = _get(uid)
     if len(s.stack) >= MAX_STACK_DEPTH:
