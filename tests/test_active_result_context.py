@@ -178,13 +178,6 @@ class ActiveViewCharacterizationTests(unittest.TestCase):
 
         self.assertEqual(nav.resolve_index(101, "1").id, "file-unrelated")
 
-    @unittest.skip(
-        "Target behavior requires result-set IDs/versions; current bot.nav stores only one "
-        "unversioned active mapping."
-    )
-    def test_target_delayed_index_from_replaced_view_is_rejected(self) -> None:
-        self.fail("Enable after versioned ActiveResultSet is implemented")
-
     def test_ordinal_helpers_resolve_first_second_and_last(self) -> None:
         first = _item("file-1", "First.pdf", index="1")
         second = _item("file-2", "Second.pdf", index="2")
