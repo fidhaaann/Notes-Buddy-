@@ -308,11 +308,50 @@ class PendingActionCharacterizationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(context.user_data["pending_action"]["intent"], "delete")
         self.assertNotIn("new_name", context.user_data["pending_action"])
 
-    @unittest.skip(
-        "Current pending_action dictionaries have no timestamps or expiry check."
-    )
-    async def test_target_expired_confirmation_is_rejected(self) -> None:
-        self.fail("Enable after typed, expiring ConfirmationRequest is implemented")
+    def test_target_expired_confirmation_is_rejected(self) -> None:
+        from application.dialogue import (
+            ClientSessionIdentity,
+            ConfirmationExpired,
+            CreateFolderParameters,
+            DialogueSessionService,
+            InMemoryDialogueSessionRepository,
+            OperationType,
+        )
+        from tests.helpers import FakeClock, SequenceIds
+
+        clock = FakeClock()
+        ids = SequenceIds("confirmation")
+        service = DialogueSessionService(
+            InMemoryDialogueSessionRepository(clock=clock, id_factory=ids),
+            clock=clock,
+            id_factory=ids,
+            confirmation_ttl_seconds=1,
+        )
+        key = ClientSessionIdentity("101", "telegram", "chat-1")
+        service.get_or_create_session(key)
+        service.set_account(key, "account-101")
+        ready = service.begin_operation(
+            key,
+            operation_type=OperationType.CREATE_FOLDER,
+            parameters=CreateFolderParameters("Projects", "root", "Home"),
+        )
+        operation = ready.pending_operation
+        waiting = service.create_confirmation(
+            key,
+            operation_id=operation.operation_id,
+            operation_summary="Create Projects",
+            consequence="Creates one folder.",
+            reversible=True,
+        )
+        confirmation = waiting.confirmation
+        clock.advance(2)
+
+        with self.assertRaises(ConfirmationExpired):
+            service.confirm_operation(
+                key,
+                operation_id=operation.operation_id,
+                confirmation_id=confirmation.confirmation_id,
+            )
 
 
 class CommandCancellationCharacterizationTests(unittest.IsolatedAsyncioTestCase):

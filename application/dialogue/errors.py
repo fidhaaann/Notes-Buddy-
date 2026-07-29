@@ -35,3 +35,43 @@ class VersionConflict(DialogueError):
 
 class NavigationLoop(DialogueError):
     """A folder transition would create a loop in the active path."""
+
+
+class PendingOperationExists(DialogueError):
+    """A non-terminal operation already owns the dialogue session."""
+
+
+class NoPendingOperation(DialogueError):
+    """The dialogue session has no pending operation."""
+
+
+class InvalidDialogueTransition(DialogueError):
+    """The requested operation-state transition is not allowed."""
+
+
+class SlotExpired(DialogueError):
+    """The active slot request has expired."""
+
+
+class ConfirmationExpired(DialogueError):
+    """The active confirmation request has expired."""
+
+
+class ConfirmationMismatch(DialogueError):
+    """A confirmation does not belong to the supplied operation."""
+
+
+class ConfirmationAlreadyConsumed(DialogueError):
+    """A confirmation was already resolved or consumed."""
+
+
+class OperationAlreadyConsumed(DialogueError):
+    """An operation has already crossed its single-use execution boundary."""
+
+
+class OperationCancelled(DialogueError):
+    """The pending operation was cancelled."""
+
+
+class OperationExpired(DialogueError):
+    """The pending operation has expired."""

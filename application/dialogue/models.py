@@ -96,6 +96,233 @@ class ItemKind(str, Enum):
     SHORTCUT = "shortcut"
 
 
+class OperationType(str, Enum):
+    CREATE_FOLDER = "create_folder"
+    RENAME = "rename"
+    MOVE = "move"
+    DELETE = "delete"
+    SHARE = "share"
+    UPLOAD = "upload"
+    COPY = "copy"
+    ZIP = "zip"
+
+
+class OperationRiskLevel(str, Enum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
+class PendingOperationStatus(str, Enum):
+    DRAFT = "draft"
+    AWAITING_SLOT = "awaiting_slot"
+    AWAITING_CONFIRMATION = "awaiting_confirmation"
+    AWAITING_STEP_UP = "awaiting_step_up"
+    READY = "ready"
+    EXECUTING = "executing"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    EXPIRED = "expired"
+    CONSUMED = "consumed"
+
+
+class ConfirmationStatus(str, Enum):
+    PENDING = "pending"
+    CONFIRMED = "confirmed"
+    DENIED = "denied"
+    EXPIRED = "expired"
+    CONSUMED = "consumed"
+
+
+@dataclass(frozen=True, slots=True)
+class OperationTargetSnapshot:
+    item_id: str
+    name_snapshot: str
+    item_kind: ItemKind
+
+    def __post_init__(self) -> None:
+        _validate_text(self.item_id, "item_id", MAX_IDENTIFIER_LENGTH)
+        _validate_text(self.name_snapshot, "name_snapshot", MAX_NAME_LENGTH)
+        if not isinstance(self.item_kind, ItemKind):
+            raise InvalidDialogueValue("item_kind must be an ItemKind")
+
+
+@dataclass(frozen=True, slots=True)
+class CreateFolderParameters:
+    folder_name: str | None
+    parent_folder_id: str
+    parent_folder_name_snapshot: str | None = None
+
+    def __post_init__(self) -> None:
+        _validate_optional_text(self.folder_name, "folder_name", 200)
+        _validate_text(
+            self.parent_folder_id,
+            "parent_folder_id",
+            MAX_IDENTIFIER_LENGTH,
+        )
+        _validate_optional_text(
+            self.parent_folder_name_snapshot,
+            "parent_folder_name_snapshot",
+            MAX_NAME_LENGTH,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class PendingOperation:
+    operation_id: str
+    operation_type: OperationType
+    principal_id: str
+    account_id: str
+    session_id: str
+    source_result_set_id: str | None
+    source_result_set_version: int | None
+    targets: tuple[OperationTargetSnapshot, ...]
+    parameters: CreateFolderParameters
+    risk_level: OperationRiskLevel
+    status: PendingOperationStatus
+    idempotency_key: str
+    created_at: float
+    expires_at: float
+
+    def __post_init__(self) -> None:
+        _validate_text(self.operation_id, "operation_id", MAX_IDENTIFIER_LENGTH)
+        if not isinstance(self.operation_type, OperationType):
+            raise InvalidDialogueValue("operation_type must be an OperationType")
+        _validate_text(self.principal_id, "principal_id", MAX_IDENTIFIER_LENGTH)
+        _validate_text(self.account_id, "account_id", MAX_IDENTIFIER_LENGTH)
+        _validate_text(self.session_id, "session_id", MAX_IDENTIFIER_LENGTH)
+        _validate_optional_text(
+            self.source_result_set_id,
+            "source_result_set_id",
+        )
+        if self.source_result_set_version is not None and (
+            not isinstance(self.source_result_set_version, int)
+            or isinstance(self.source_result_set_version, bool)
+            or self.source_result_set_version <= 0
+        ):
+            raise InvalidDialogueValue(
+                "source_result_set_version must be positive"
+            )
+        if not isinstance(self.targets, tuple) or not all(
+            isinstance(target, OperationTargetSnapshot)
+            for target in self.targets
+        ):
+            raise InvalidDialogueValue(
+                "targets must be an immutable tuple of snapshots"
+            )
+        if not isinstance(self.parameters, CreateFolderParameters):
+            raise InvalidDialogueValue(
+                "parameters must be CreateFolderParameters"
+            )
+        if not isinstance(self.risk_level, OperationRiskLevel):
+            raise InvalidDialogueValue(
+                "risk_level must be an OperationRiskLevel"
+            )
+        if not isinstance(self.status, PendingOperationStatus):
+            raise InvalidDialogueValue(
+                "status must be a PendingOperationStatus"
+            )
+        _validate_text(
+            self.idempotency_key,
+            "idempotency_key",
+            MAX_IDENTIFIER_LENGTH,
+        )
+        _validate_timestamp(self.created_at, "created_at")
+        _validate_timestamp(self.expires_at, "expires_at")
+        if self.expires_at <= self.created_at:
+            raise InvalidDialogueValue("expires_at must be later than created_at")
+
+    def is_expired(self, now: float) -> bool:
+        _validate_timestamp(now, "now")
+        return now >= self.expires_at
+
+
+@dataclass(frozen=True, slots=True)
+class SlotRequest:
+    slot_request_id: str
+    operation_id: str
+    slot_name: str
+    expected_type: str
+    prompt_key: str
+    attempts: int
+    created_at: float
+    expires_at: float
+
+    def __post_init__(self) -> None:
+        _validate_text(
+            self.slot_request_id,
+            "slot_request_id",
+            MAX_IDENTIFIER_LENGTH,
+        )
+        _validate_text(self.operation_id, "operation_id", MAX_IDENTIFIER_LENGTH)
+        _validate_text(self.slot_name, "slot_name", 128)
+        _validate_text(self.expected_type, "expected_type", 64)
+        _validate_text(self.prompt_key, "prompt_key", 128)
+        if (
+            not isinstance(self.attempts, int)
+            or isinstance(self.attempts, bool)
+            or self.attempts < 0
+        ):
+            raise InvalidDialogueValue("attempts must be non-negative")
+        _validate_timestamp(self.created_at, "created_at")
+        _validate_timestamp(self.expires_at, "expires_at")
+        if self.expires_at <= self.created_at:
+            raise InvalidDialogueValue("expires_at must be later than created_at")
+
+    def is_expired(self, now: float) -> bool:
+        _validate_timestamp(now, "now")
+        return now >= self.expires_at
+
+
+@dataclass(frozen=True, slots=True)
+class ConfirmationRequest:
+    confirmation_id: str
+    operation_id: str
+    principal_id: str
+    session_id: str
+    operation_summary: str
+    target_snapshots: tuple[OperationTargetSnapshot, ...]
+    consequence: str
+    reversible: bool
+    created_at: float
+    expires_at: float
+    status: ConfirmationStatus = ConfirmationStatus.PENDING
+
+    def __post_init__(self) -> None:
+        _validate_text(
+            self.confirmation_id,
+            "confirmation_id",
+            MAX_IDENTIFIER_LENGTH,
+        )
+        _validate_text(self.operation_id, "operation_id", MAX_IDENTIFIER_LENGTH)
+        _validate_text(self.principal_id, "principal_id", MAX_IDENTIFIER_LENGTH)
+        _validate_text(self.session_id, "session_id", MAX_IDENTIFIER_LENGTH)
+        _validate_text(self.operation_summary, "operation_summary", 1024)
+        if not isinstance(self.target_snapshots, tuple) or not all(
+            isinstance(target, OperationTargetSnapshot)
+            for target in self.target_snapshots
+        ):
+            raise InvalidDialogueValue(
+                "target_snapshots must be an immutable tuple"
+            )
+        _validate_text(self.consequence, "consequence", 1024)
+        if not isinstance(self.reversible, bool):
+            raise InvalidDialogueValue("reversible must be a boolean")
+        _validate_timestamp(self.created_at, "created_at")
+        _validate_timestamp(self.expires_at, "expires_at")
+        if self.expires_at <= self.created_at:
+            raise InvalidDialogueValue("expires_at must be later than created_at")
+        if not isinstance(self.status, ConfirmationStatus):
+            raise InvalidDialogueValue(
+                "status must be a ConfirmationStatus"
+            )
+
+    def is_expired(self, now: float) -> bool:
+        _validate_timestamp(now, "now")
+        return now >= self.expires_at
+
+
 @dataclass(frozen=True, slots=True)
 class ClientSessionIdentity:
     """Stable principal plus one isolated client conversation."""
@@ -315,6 +542,10 @@ class DialogueSession:
     folder_history: tuple[FolderLocation, ...] = ()
     active_result_set: ActiveResultSet | None = None
     last_selected_item: SelectedItemReference | None = None
+    pending_operation: PendingOperation | None = None
+    slot_request: SlotRequest | None = None
+    confirmation: ConfirmationRequest | None = None
+    consumed_operation_ids: tuple[str, ...] = ()
     experience_mode: ExperienceMode = ExperienceMode.GUIDED
     file_selection_behavior: FileSelectionBehavior = (
         FileSelectionBehavior.SHOW_DETAILS
@@ -359,6 +590,35 @@ class DialogueSession:
         ):
             raise InvalidDialogueValue(
                 "last_selected_item must be a SelectedItemReference"
+            )
+        if (
+            self.pending_operation is not None
+            and not isinstance(self.pending_operation, PendingOperation)
+        ):
+            raise InvalidDialogueValue(
+                "pending_operation must be a PendingOperation"
+            )
+        if (
+            self.slot_request is not None
+            and not isinstance(self.slot_request, SlotRequest)
+        ):
+            raise InvalidDialogueValue("slot_request must be a SlotRequest")
+        if (
+            self.confirmation is not None
+            and not isinstance(self.confirmation, ConfirmationRequest)
+        ):
+            raise InvalidDialogueValue(
+                "confirmation must be a ConfirmationRequest"
+            )
+        if not isinstance(self.consumed_operation_ids, tuple):
+            raise InvalidDialogueValue(
+                "consumed_operation_ids must be an immutable tuple"
+            )
+        for operation_id in self.consumed_operation_ids:
+            _validate_text(
+                operation_id,
+                "consumed_operation_id",
+                MAX_IDENTIFIER_LENGTH,
             )
         if not isinstance(self.experience_mode, ExperienceMode):
             raise InvalidDialogueValue("experience_mode must be an ExperienceMode")

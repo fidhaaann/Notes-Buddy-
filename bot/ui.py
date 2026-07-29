@@ -127,6 +127,13 @@ def upload_confirm_keyboard() -> InlineKeyboardMarkup:
     ]])
 
 
+def typed_pending_cancel_keyboard() -> InlineKeyboardMarkup:
+    """Reusable cancellation control for typed dialogue operations."""
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("Cancel", callback_data="dialogue:cancel"),
+    ]])
+
+
 # ── Utility keyboards ────────────────────────────────────────────────────────
 
 def back_to_menu_keyboard() -> InlineKeyboardMarkup:

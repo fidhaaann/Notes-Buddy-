@@ -25,7 +25,10 @@ from googleapiclient.errors import HttpError
 
 from drive import drive_service as ds
 from bot import formatter, ui, nav
-from bot.dialogue import publish_active_view_to_dialogue
+from bot.dialogue import (
+    cancel_typed_pending_callback_work,
+    publish_active_view_to_dialogue,
+)
 from db import models
 from services.parser import human_size
 from services import anomaly_detection
@@ -269,6 +272,19 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     parts = data.split(":")
     ns = parts[0]
+
+    if ns == "dialogue":
+        action = parts[1] if len(parts) > 1 else ""
+        if action == "cancel" and len(parts) == 2:
+            if cancel_typed_pending_callback_work(update, context):
+                await _reply(query, update, "Cancelled. No changes were made.")
+            else:
+                await _reply(
+                    query,
+                    update,
+                    "There is no active action to cancel.",
+                )
+        return
 
     # ── Navigation ────────────────────────────────────────────────────────────
 

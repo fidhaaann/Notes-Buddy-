@@ -49,7 +49,11 @@ from bot.commands import (
     cmd_index,
 )
 from bot.callbacks import handle_callback
-from bot.dialogue import handle_active_result_selection
+from bot.dialogue import (
+    begin_create_folder_dialogue,
+    handle_active_result_selection,
+    handle_typed_pending_dialogue,
+)
 from bot.errors import handle_error
 from bot import formatter, nav, ui
 from db import models
@@ -376,6 +380,9 @@ async def handle_text_input(update, context) -> None:
         )
         return
 
+    if await handle_typed_pending_dialogue(update, context):
+        return
+
     # ── Copilot: pending slot fill ────────────────────────────────────────
     from copilot import slot_filler
     if slot_filler.has_pending(context.user_data):
@@ -520,6 +527,8 @@ async def _handle_copilot_message(update, context, text: str) -> bool:
     # ── Step 7: Check slot completeness ───────────────────────────────────
     slot_result = slot_filler.check_slots(result.intent, result.entities)
     if not slot_result.complete:
+        if intent_type == IntentType.MKDIR:
+            return await begin_create_folder_dialogue(update, context, None)
         # Use LLM's clarification if available, otherwise use slot filler's prompt
         prompt = result.clarification or slot_result.prompt or "Could you provide more details?"
         slot_filler.set_pending(context.user_data, {

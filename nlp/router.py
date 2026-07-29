@@ -10,7 +10,10 @@ from rapidfuzz import process, fuzz
 
 from bot import commands as bot_commands
 from bot import formatter, nav, ui
-from bot.dialogue import publish_active_view_to_dialogue
+from bot.dialogue import (
+    begin_create_folder_dialogue,
+    publish_active_view_to_dialogue,
+)
 from db import models
 from drive import auth as drive_auth
 from drive import drive_service as ds
@@ -1314,16 +1317,21 @@ async def _handle_zip(update, context, intent: intent_types.Intent) -> None:
 
 
 async def _handle_mkdir(update, context, intent: intent_types.Intent) -> None:
-    assert context.user_data is not None
-    uid = update.effective_user.id
-    name = intent.target_name or _strip_action_words(normalize.normalize_text(intent.raw_text))
+    explicit_name = re.search(
+        r"\b(?:called|named)\s+(.+)$",
+        intent.raw_text.strip(),
+        flags=re.IGNORECASE,
+    )
+    name = intent.target_name or (
+        explicit_name.group(1).strip()
+        if explicit_name
+        else _strip_action_words(
+            normalize.normalize_text(intent.raw_text),
+            extra={"create", "make", "new", "mkdir", "directory", "called", "named"},
+        )
+    )
     name = validators.sanitize_text(name)
-    if not name:
-        context.user_data["pending_action"] = {"intent": "mkdir", "awaiting_name": True}
-        await update.message.reply_text(formatter.nlp_clarify("What should the folder be named?"))
-        return
-    created = await ds.create_folder_async(uid, name, nav.current_folder_id(uid))
-    await update.message.reply_text(formatter.success("Folder Created", created.get("name"), nav.breadcrumb(uid)))
+    await begin_create_folder_dialogue(update, context, name or None)
 
 
 async def _handle_recent(update, context) -> None:

@@ -28,7 +28,11 @@ from drive import auth as drive_auth
 from drive import drive_service as ds
 from bot import formatter, ui
 from bot import nav
-from bot.dialogue import publish_active_view_to_dialogue
+from bot.dialogue import (
+    begin_create_folder_dialogue,
+    cancel_typed_pending_work,
+    publish_active_view_to_dialogue,
+)
 from services import parser as p
 from services import anomaly_detection
 from services import stepup_auth
@@ -614,6 +618,7 @@ async def cmd_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Cancel upload mode or any pending operation."""
     assert context.user_data is not None
+    cancel_typed_pending_work(update, context)
     context.user_data.pop("upload_mode", None)
     context.user_data.pop("pending_upload", None)
     await _msg(update).reply_text(
@@ -943,25 +948,8 @@ async def cmd_mkdir(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
     args = p.parse_args(_text(update), "/mkdir")
-    if not args:
-        await _msg(update).reply_text(
-            formatter.error("Missing name.", "Try: create folder <name>.")
-        )
-        return
-    name = " ".join(args)
-    try:
-        created = await ds.create_folder_async(uid, name, parent_id=nav.current_folder_id(uid))
-        await _msg(update).reply_text(
-            formatter.success("Folder Created", created["name"], nav.breadcrumb(uid)),
-            reply_markup=ui.back_to_menu_keyboard(),
-        )
-    except PermissionError:
-        await _msg(update).reply_text(formatter.login_required())
-    except Exception as e:
-        logger.exception("cmd_mkdir error")
-        await _msg(update).reply_text(
-            formatter.error("Could not create folder.", "Try a different name.")
-        )
+    name = " ".join(args) if args else None
+    await begin_create_folder_dialogue(update, context, name)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

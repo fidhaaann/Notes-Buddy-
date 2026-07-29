@@ -34,6 +34,17 @@ MAX_INDEX_CHARS = int(os.environ.get("MAX_INDEX_CHARS", "200000"))
 # NLP context
 NLP_CONTEXT_TTL_SECONDS = int(os.environ.get("NLP_CONTEXT_TTL_SECONDS", "900"))
 
+# Typed pending dialogue state
+PENDING_OPERATION_TTL_SECONDS = int(
+    os.environ.get("PENDING_OPERATION_TTL_SECONDS", "900")
+)
+SLOT_REQUEST_TTL_SECONDS = int(
+    os.environ.get("SLOT_REQUEST_TTL_SECONDS", "600")
+)
+CONFIRMATION_TTL_SECONDS = int(
+    os.environ.get("CONFIRMATION_TTL_SECONDS", "300")
+)
+
 # Rate limit defaults
 RATE_LIMIT_COOLDOWN_SECONDS = float(os.environ.get("RATE_LIMIT_COOLDOWN", "3"))
 RATE_LIMIT_WINDOW_SECONDS = int(os.environ.get("RATE_LIMIT_WINDOW", "60"))
